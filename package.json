@@ -177,6 +177,8 @@
     "dev:visual:rmd": "bash ./scripts/open_visual_host.sh example.rmd",
     "dev:example": "bash ./scripts/open_visual_host.sh example.qmd",
     "dev:example:rmd": "bash ./scripts/open_visual_host.sh example.rmd",
+    "deploy": "vsce publish",
+    "deploy:manual": "npm run publish:precheck && npm run deploy",
     "package:vsix": "vsce package",
     "publish:precheck": "npm run test && npm run package:vsix",
     "test:unit": "npm run compile && mocha \"out/src/test/**/*.test.js\"",

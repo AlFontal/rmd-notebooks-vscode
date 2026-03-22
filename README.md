@@ -80,6 +80,28 @@ Marketplace notes:
 - `publisher` must match a real VS Code Marketplace publisher you control
 - the extension is currently marked `"preview": true`
 
+## Publishing
+
+One-time setup:
+
+1. Create an Azure DevOps Personal Access Token with `Marketplace (Manage)` scope and `All accessible organizations`.
+2. Create or verify the Marketplace publisher `AlFontal`, which must match the `publisher` field in `package.json`.
+3. Add the token as a GitHub Actions secret named `VSCE_PAT` in this repository.
+
+Manual publish from your machine:
+
+```bash
+vsce login AlFontal
+npm run deploy:manual
+```
+
+GitHub release flow:
+
+1. Bump `version` in `package.json` and update `CHANGELOG.md`.
+2. Push the commit to `main`.
+3. Create a GitHub release with the matching tag, for example `v0.1.1`.
+4. The release workflow in `.github/workflows/release.yml` will run tests, build the `.vsix`, upload it as a workflow artifact, and publish to the Marketplace if `VSCE_PAT` is configured.
+
 ## Example notebooks
 
 - `test/manual-workspace/example.qmd`
