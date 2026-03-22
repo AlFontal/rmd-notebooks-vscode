@@ -1,0 +1,9 @@
+```{r}
+summary(cars)
+```
+
+```{r broken
+plot(cars)
+
+```{r second}
+1 + 1

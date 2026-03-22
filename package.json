@@ -1,0 +1,195 @@
+{
+  "name": "rmd-notebooks-vscode",
+  "displayName": "Rmd Notebooks for VS Code",
+  "description": "Open .Rmd and .qmd files as runnable R notebooks in VS Code.",
+  "version": "0.1.0",
+  "publisher": "AlFontal",
+  "author": "Alejandro Fontal",
+  "license": "MIT",
+  "preview": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AlFontal/rmd-notebooks-vscode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AlFontal/rmd-notebooks-vscode/issues"
+  },
+  "homepage": "https://github.com/AlFontal/rmd-notebooks-vscode#readme",
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "r",
+    "rmarkdown",
+    "quarto",
+    "qmd",
+    "rmd",
+    "notebook"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "notebooks": [
+      {
+        "type": "rmd-notebooks-vscode-notebook",
+        "displayName": "Rmd Notebooks",
+        "selector": [
+          {
+            "filenamePattern": "*.qmd"
+          },
+          {
+            "filenamePattern": "*.rmd"
+          },
+          {
+            "filenamePattern": "*.Rmd"
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "rmdNotebooks.runCurrentChunk",
+        "title": "Rmd Notebooks: Run Current Chunk"
+      },
+      {
+        "command": "rmdNotebooks.runAllChunks",
+        "title": "Rmd Notebooks: Run All Chunks"
+      },
+      {
+        "command": "rmdNotebooks.clearCurrentOutput",
+        "title": "Rmd Notebooks: Clear Current Output"
+      },
+      {
+        "command": "rmdNotebooks.clearAllOutputs",
+        "title": "Rmd Notebooks: Clear All Outputs"
+      },
+      {
+        "command": "rmdNotebooks.restartSession",
+        "title": "Restart R Session",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "rmdNotebooks.runCurrentChunkInTerminal",
+        "title": "Rmd Notebooks: Run Current Chunk in R Terminal"
+      },
+      {
+        "command": "rmdNotebooks.showOutputChannel",
+        "title": "Rmd Notebooks: Show Output Panel"
+      },
+      {
+        "command": "rmdNotebooks.editChunkHeader",
+        "title": "Rmd Notebooks: Edit Chunk Header"
+      },
+      {
+        "command": "rmdNotebooks.toggleSourceView",
+        "title": "Rmd Notebooks: Toggle Notebook / Raw Source View"
+      },
+      {
+        "command": "rmdNotebooks.viewSource",
+        "title": "View Source",
+        "icon": "$(file-code)"
+      }
+    ],
+    "menus": {
+      "notebook/toolbar": [
+        {
+          "command": "rmdNotebooks.restartSession",
+          "when": "notebookType == rmd-notebooks-vscode-notebook",
+          "group": "navigation@98"
+        },
+        {
+          "command": "rmdNotebooks.viewSource",
+          "when": "notebookType == rmd-notebooks-vscode-notebook",
+          "group": "navigation@99"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Rmd Notebooks",
+      "properties": {
+        "rmdNotebooks.r.path": {
+          "type": "string",
+          "default": "R",
+          "description": "Path to the R executable used for chunk execution."
+        },
+        "rmdNotebooks.execution.interactiveFallbackTimeoutMs": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 1000,
+          "description": "How long inline execution can wait before assuming the chunk needs interactive terminal input."
+        },
+        "rmdNotebooks.execution.interactiveFallbackBehavior": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "terminal",
+            "error"
+          ],
+          "default": "prompt",
+          "description": "How to handle chunks that appear to need interactive input."
+        },
+        "rmdNotebooks.output.maxTextLines": {
+          "type": "number",
+          "default": 16,
+          "minimum": 1,
+          "description": "Reserved for output preview compatibility."
+        },
+        "rmdNotebooks.output.maxPreviewCharacters": {
+          "type": "number",
+          "default": 160,
+          "minimum": 40,
+          "description": "Maximum number of characters shown in the inline text preview for each chunk."
+        },
+        "rmdNotebooks.output.plotWidth": {
+          "type": "number",
+          "default": 320,
+          "minimum": 120,
+          "description": "Maximum width in pixels for inline plot previews before viewport scaling is applied."
+        },
+        "rmdNotebooks.output.plotHeight": {
+          "type": "number",
+          "default": 220,
+          "minimum": 120,
+          "description": "Maximum height in pixels for inline plot previews before viewport scaling is applied."
+        },
+        "rmdNotebooks.output.revealMode": {
+          "type": "string",
+          "enum": [
+            "always",
+            "errors",
+            "never"
+          ],
+          "default": "errors",
+          "description": "When to reveal the Rmd Notebooks output panel after running a chunk."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "dev:visual": "bash ./scripts/open_visual_host.sh example.qmd",
+    "dev:visual:rmd": "bash ./scripts/open_visual_host.sh example.rmd",
+    "dev:example": "bash ./scripts/open_visual_host.sh example.qmd",
+    "dev:example:rmd": "bash ./scripts/open_visual_host.sh example.rmd",
+    "package:vsix": "vsce package",
+    "publish:precheck": "npm run test && npm run package:vsix",
+    "test:unit": "npm run compile && mocha \"out/src/test/**/*.test.js\"",
+    "test:vscode": "npm run compile && node ./out/test/vscode/runVscodeTests.js",
+    "test": "npm run test:unit && npm run test:vscode"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.15.30",
+    "@types/vscode": "^1.88.0",
+    "@vscode/test-electron": "^2.5.2",
+    "mocha": "^11.2.2",
+    "typescript": "^5.8.3"
+  }
+}

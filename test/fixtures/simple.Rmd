@@ -1,0 +1,7 @@
+---
+title: Simple
+---
+
+```{r my-chunk, echo=FALSE}
+plot(cars)
+```

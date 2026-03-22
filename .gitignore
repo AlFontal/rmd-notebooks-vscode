@@ -1,0 +1,8 @@
+.DS_Store
+node_modules
+out
+*.vsix
+.tmp-rmd-notebooks-vscode-artifacts
+.tmp-inline-chunks-artifacts
+.vscode-test
+rmd-notebooks-recording.mov

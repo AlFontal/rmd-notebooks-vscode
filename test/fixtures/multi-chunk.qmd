@@ -1,0 +1,13 @@
+# Multi chunk
+
+```{r}
+summary(cars)
+```
+
+```js
+console.log("ignored")
+```
+
+```{python}
+print("parsed, not executable yet")
+```

@@ -1,0 +1,42 @@
+# Rmd notebooks extension example
+
+In this `.Rmd` file we will simply run a couple of chunks to showcase the extension.
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tibble)
+
+theme_set(theme_minimal(base_size = 8))
+```
+
+
+
+Txt/HTML content gets printed inline
+
+```{r}
+data(penguins)
+head(penguins)
+```
+
+
+
+Figures are also shown inline, and parameters can be controlled in the same way
+as `knitr` options by editing the bracketed content:
+
+```{r, fig.width=8, fig.height=6, dpi=90}
+ggplot(penguins) + 
+    aes(flipper_len, fill=species) + 
+    geom_histogram(
+        aes(y = after_stat(density)),
+        position = "identity",
+        alpha = 0.35,
+        bins = 30
+    ) +
+    labs(x="Flipper length (mm)", y="Frequency") +
+    scale_fill_manual(values = c(
+        "Adelie" = "#F4A340",
+        "Chinstrap" = "#B36AE8",
+        "Gentoo" = "#4FAEAE")
+)
+```

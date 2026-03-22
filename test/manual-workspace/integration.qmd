@@ -1,0 +1,20 @@
+# Rmd Notebooks Manual Check
+
+This file exists so the Extension Development Host opens with a minimal document set.
+
+```{r first}
+x <- 1
+x + 1
+```
+
+```{r htmler}
+rmd_notebooks_html("<strong>hello from qmd</strong>")
+```
+
+```{r second}
+summary(cars)
+```
+
+```{r plotter}
+plot(cars)
+```
