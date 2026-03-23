@@ -8,6 +8,7 @@
   <img alt="Preview" src="https://img.shields.io/badge/status-preview-E67E22" />
   <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/AlFontal/rmd-notebooks-vscode/ci.yml?branch=main&label=ci" />
   <a href="https://marketplace.visualstudio.com/items?itemName=AlFontal.rmd-notebooks-vscode"><img alt="Install for VS Code" src="https://img.shields.io/badge/install-for%20VS%20Code-007ACC?logo=visualstudiocode&logoColor=white" /></a>
+  <a href="https://open-vsx.org/extension/AlFontal/rmd-notebooks-vscode"><img alt="Install for Positron" src="https://img.shields.io/badge/install-for%20Positron-447099" /></a>
   <img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-%5E1.88-007ACC?logo=visualstudiocode&logoColor=white" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-2E8B57" />
 </p>
@@ -23,6 +24,12 @@ This extension closes most of that gap. It opens `.Rmd` and `.qmd` files as runn
 ## Demo
 
 <img src="./media/readme/demo.gif" alt="Rmd Notebooks for VS Code demo" width="1000" />
+
+## Install
+
+- VS Code: install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=AlFontal.rmd-notebooks-vscode)
+- Positron: install from [Open VSX](https://open-vsx.org/extension/AlFontal/rmd-notebooks-vscode)
+- Manual: download the `.vsix` from the [GitHub releases page](https://github.com/AlFontal/rmd-notebooks-vscode/releases)
 
 ## Status
 
@@ -84,7 +91,7 @@ npm run dev:example:rmd
 ## CI/CD
 
 - GitHub Actions runs the lightweight repository checks on pushes and pull requests.
-- GitHub Actions also handles the release path: it packages the extension as a `.vsix`, attaches it to GitHub releases, and publishes release tags to the VS Code Marketplace.
+- GitHub Actions also handles the release path: it packages the extension as a `.vsix`, attaches it to GitHub releases, and publishes release tags to both the VS Code Marketplace and Open VSX.
 - The full macOS extension-host test flow is kept as a local verification step via `npm test`.
 
 ## Example notebooks

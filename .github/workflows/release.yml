@@ -65,6 +65,6 @@ jobs:
 
       - name: Publish to Open VSX
         if: github.event_name == 'release' || inputs.publish_openvsx
-        run: npx ovsx publish -p "$OVSX_PAT"
+        run: npm run deploy:openvsx -- -p "$OVSX_PAT"
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
