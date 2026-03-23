@@ -1,4 +1,15 @@
+<p align="center">
+  <img src="./media/readme/logo.png" alt="Rmd Notebooks for VS Code logo" width="96" />
+</p>
+
 # Rmd Notebooks for VS Code
+
+<p align="center">
+  <img alt="Preview" src="https://img.shields.io/badge/status-preview-E67E22" />
+  <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/AlFontal/rmd-notebooks-vscode/ci.yml?branch=main&label=ci" />
+  <img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-%5E1.88-007ACC?logo=visualstudiocode&logoColor=white" />
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-2E8B57" />
+</p>
 
 Open `.Rmd` and `.qmd` files as runnable R notebooks in VS Code while keeping the source file on disk in fenced-source form.
 
@@ -58,6 +69,8 @@ npm run compile
 npm test
 ```
 
+`npm test` is the full local verification path, including the real VS Code extension-host suite. GitHub Actions stays lighter and only runs the unit tests plus packaging checks.
+
 Manual visual sessions:
 
 ```bash
@@ -100,7 +113,7 @@ GitHub release flow:
 1. Bump `version` in `package.json` and update `CHANGELOG.md`.
 2. Push the commit to `main`.
 3. Create a GitHub release with the matching tag, for example `v0.1.1`.
-4. The release workflow in `.github/workflows/release.yml` will run tests, build the `.vsix`, upload it as a workflow artifact, and publish to the Marketplace if `VSCE_PAT` is configured.
+4. The release workflow in `.github/workflows/release.yml` will run the unit tests, build the `.vsix`, upload it as a workflow artifact, and publish to the Marketplace if `VSCE_PAT` is configured.
 
 ## Example notebooks
 

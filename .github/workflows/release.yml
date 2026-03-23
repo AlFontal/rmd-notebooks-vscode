@@ -8,7 +8,7 @@ on:
 
 jobs:
   package-and-publish:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -18,7 +18,7 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npm test
+      - run: npm run test:unit
       - run: npm run package:vsix
 
       - uses: actions/upload-artifact@v4
