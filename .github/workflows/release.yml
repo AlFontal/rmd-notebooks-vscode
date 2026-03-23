@@ -6,6 +6,9 @@ on:
     types:
       - published
 
+permissions:
+  contents: write
+
 jobs:
   package:
     runs-on: ubuntu-latest
