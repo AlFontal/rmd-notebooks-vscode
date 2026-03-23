@@ -2,6 +2,17 @@ name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_marketplace:
+        description: Publish to the VS Code Marketplace
+        required: false
+        default: false
+        type: boolean
+      publish_openvsx:
+        description: Publish to Open VSX
+        required: false
+        default: true
+        type: boolean
   release:
     types:
       - published
@@ -36,7 +47,13 @@ jobs:
           files: "*.vsix"
 
       - name: Publish to VS Code Marketplace
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || inputs.publish_marketplace
         run: npm run deploy
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Publish to Open VSX
+        if: github.event_name == 'release' || inputs.publish_openvsx
+        run: npx ovsx publish -p "$OVSX_PAT"
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
