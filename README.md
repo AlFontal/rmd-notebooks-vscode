@@ -80,40 +80,11 @@ npm run dev:example
 npm run dev:example:rmd
 ```
 
-## Packaging
+## CI/CD
 
-```bash
-npm run publish:precheck
-```
-
-That runs tests and builds a `.vsix` package with `vsce`.
-
-Marketplace notes:
-
-- `publisher` must match a real VS Code Marketplace publisher you control
-- the extension is currently marked `"preview": true`
-
-## Publishing
-
-One-time setup:
-
-1. Create an Azure DevOps Personal Access Token with `Marketplace (Manage)` scope and `All accessible organizations`.
-2. Create or verify the Marketplace publisher `AlFontal`, which must match the `publisher` field in `package.json`.
-3. Add the token as a GitHub Actions secret named `VSCE_PAT` in this repository.
-
-Manual publish from your machine:
-
-```bash
-vsce login AlFontal
-npm run deploy:manual
-```
-
-GitHub release flow:
-
-1. Bump `version` in `package.json` and update `CHANGELOG.md`.
-2. Push the commit to `main`.
-3. Create a GitHub release with the matching tag, for example `v0.1.1`.
-4. The release workflow in `.github/workflows/release.yml` will run the unit tests, build the `.vsix`, upload it as a workflow artifact, and publish to the Marketplace if `VSCE_PAT` is configured.
+- GitHub Actions runs the lightweight repository checks on pushes and pull requests.
+- Azure Pipelines is used for the release path: it packages the extension as a `.vsix`, publishes the build artifact, and can publish tagged releases to the VS Code Marketplace.
+- The full macOS extension-host test flow is kept as a local verification step via `npm test`.
 
 ## Example notebooks
 

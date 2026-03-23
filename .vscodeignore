@@ -13,6 +13,7 @@ UX_SPEC.md
 VISION.md
 AGENTS.md
 .github/**
+azure-pipelines.yml
 .tmp-*/**
 .tmp-inline-chunks-artifacts/**
 .tmp-rmd-notebooks-vscode-artifacts/**
