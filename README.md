@@ -84,7 +84,7 @@ npm run dev:example:rmd
 ## CI/CD
 
 - GitHub Actions runs the lightweight repository checks on pushes and pull requests.
-- GitHub Actions also handles the release path: it packages the extension as a `.vsix` and attaches it to GitHub releases.
+- GitHub Actions also handles the release path: it packages the extension as a `.vsix`, attaches it to GitHub releases, and publishes release tags to the VS Code Marketplace.
 - The full macOS extension-host test flow is kept as a local verification step via `npm test`.
 
 ## Example notebooks

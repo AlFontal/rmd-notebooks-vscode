@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- publish GitHub release tags to the VS Code Marketplace via GitHub Actions
+
 ## 0.1.2
 
 - remove unreliable Marketplace stats badges from the README

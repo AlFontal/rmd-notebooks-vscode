@@ -34,3 +34,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: "*.vsix"
+
+      - name: Publish to VS Code Marketplace
+        if: github.event_name == 'release'
+        run: npm run deploy
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
