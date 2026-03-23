@@ -13,6 +13,11 @@ on:
         required: false
         default: true
         type: boolean
+      create_openvsx_namespace:
+        description: Create the Open VSX namespace before publishing
+        required: false
+        default: false
+        type: boolean
   release:
     types:
       - published
@@ -51,6 +56,12 @@ jobs:
         run: npm run deploy
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Create Open VSX namespace
+        if: inputs.create_openvsx_namespace
+        run: npx ovsx create-namespace AlFontal -p "$OVSX_PAT"
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
 
       - name: Publish to Open VSX
         if: github.event_name == 'release' || inputs.publish_openvsx
