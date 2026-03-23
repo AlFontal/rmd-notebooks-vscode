@@ -7,8 +7,6 @@
 <p align="center">
   <img alt="Preview" src="https://img.shields.io/badge/status-preview-E67E22" />
   <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/AlFontal/rmd-notebooks-vscode/ci.yml?branch=main&label=ci" />
-  <a href="https://marketplace.visualstudio.com/items?itemName=AlFontal.rmd-notebooks-vscode"><img alt="Visual Studio Marketplace Version" src="https://img.shields.io/visual-studio-marketplace/v/AlFontal.rmd-notebooks-vscode?label=marketplace&color=0A7BBB" /></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=AlFontal.rmd-notebooks-vscode"><img alt="Visual Studio Marketplace Installs" src="https://img.shields.io/visual-studio-marketplace/i/AlFontal.rmd-notebooks-vscode?color=0A7BBB" /></a>
   <a href="https://marketplace.visualstudio.com/items?itemName=AlFontal.rmd-notebooks-vscode"><img alt="Install for VS Code" src="https://img.shields.io/badge/install-for%20VS%20Code-007ACC?logo=visualstudiocode&logoColor=white" /></a>
   <img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-%5E1.88-007ACC?logo=visualstudiocode&logoColor=white" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-2E8B57" />

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- remove unreliable Marketplace stats badges from the README
+- verify the GitHub release workflow after fixing release asset upload permissions
+
 ## 0.1.1
 
 - refresh release assets and packaging metadata
