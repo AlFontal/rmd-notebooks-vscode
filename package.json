@@ -2,7 +2,7 @@
   "name": "rmd-notebooks-vscode",
   "displayName": "Rmd Notebooks for VS Code",
   "description": "Open .Rmd and .qmd files as runnable R notebooks in VS Code and Positron.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "AlFontal",
   "author": "Alejandro Fontal",
   "license": "MIT",

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4
+
+- support inline prompt UI for common R interactions such as `menu()` and `readline()`
+- keep unsupported interactive flows on the existing terminal fallback path
+
 ## 0.1.3
 
 - publish GitHub release tags to the VS Code Marketplace via GitHub Actions

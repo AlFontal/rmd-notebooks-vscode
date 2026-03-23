@@ -25,6 +25,21 @@ export interface InlineChunksExtensionApi {
     }>;
     outputChannelText: string;
   }>;
+  setTestPromptResponses(responses: Array<{ cancelled?: boolean; value?: string }>): void;
+  clearTestPromptResponses(): void;
+  takeTestPromptRequests(): Array<{
+    kind: string;
+    title?: string;
+    prompt: string;
+    placeHolder?: string;
+    defaultValue?: string;
+    allowEmpty?: boolean;
+    choices?: Array<{
+      label: string;
+      value: string;
+      description?: string;
+    }>;
+  }>;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<InlineChunksExtensionApi> {
@@ -56,7 +71,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
   await notebookRuntime.initialize();
 
   return {
-    getDocumentState: async (documentUri: string) => notebookRuntime.getDocumentState(documentUri)
+    getDocumentState: async (documentUri: string) => notebookRuntime.getDocumentState(documentUri),
+    setTestPromptResponses: (responses) =>
+      notebookRuntime.setTestPromptResponses(
+        responses.map((response) => ({
+          cancelled: response.cancelled ?? false,
+          value: response.value
+        }))
+      ),
+    clearTestPromptResponses: () => notebookRuntime.clearTestPromptResponses(),
+    takeTestPromptRequests: () => notebookRuntime.takeTestPromptRequests()
   };
 }
 

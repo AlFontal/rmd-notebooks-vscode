@@ -43,6 +43,7 @@ Current capabilities:
 - restores cached outputs on reopen
 - marks outputs stale after code edits
 - supports chunk-header editing from notebook mode
+- supports inline prompt UI for common R interactions such as `menu()` and `readline()`
 - lets you switch between notebook view and raw source view
 
 Current limits:
@@ -51,7 +52,7 @@ Current limits:
 - static image plots only
 - no htmlwidgets
 - only a small subset of knitr options is enforced today: `eval=FALSE`, `include=FALSE`, `results='hide'`
-- interactive chunks fall back to an R terminal instead of inline stdin dialogs
+- unsupported interactive flows still fall back to an R terminal after timeout
 
 ## Commands
 
@@ -67,7 +68,7 @@ Current limits:
 
 The notebook toolbar also exposes `Restart R Session` and `View Source`.
 
-If inline execution appears to stall because a chunk wants interactive input, the extension can prompt to run that chunk in an integrated R terminal instead. This is controlled by `rmdNotebooks.execution.interactiveFallbackBehavior` and `rmdNotebooks.execution.interactiveFallbackTimeoutMs`.
+Common prompt-style interactions such as `menu()` and `readline()` are handled inline with VS Code pickers and input boxes. If execution still appears to stall because a chunk wants unsupported interactive input, the extension can prompt to run that chunk in an integrated R terminal instead. This is controlled by `rmdNotebooks.execution.interactiveFallbackBehavior` and `rmdNotebooks.execution.interactiveFallbackTimeoutMs`.
 
 ## Development
 

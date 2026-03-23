@@ -4,7 +4,13 @@ import { assignChunkIdentities } from "../document/chunkIdentity";
 import { ChunkIdentitySeed, ChunkOutputRecord, ExecutableChunk, OutputItem, ParsedExecutableChunk } from "../document/chunkTypes";
 import { OutputChannelController } from "../editor/outputChannelController";
 import { ExecutorRegistry } from "../execution/executorRegistry";
-import { ExecutionResult, PlotRenderOptions } from "../execution/executorTypes";
+import {
+  ExecutionResult,
+  InteractivePromptChoice,
+  InteractivePromptRequest,
+  InteractivePromptResponse,
+  PlotRenderOptions
+} from "../execution/executorTypes";
 import { InteractiveExecutionError } from "../execution/executionErrors";
 import { RTerminalRunner } from "../execution/rTerminalRunner";
 import { OutputStore } from "../persistence/outputStore";
@@ -37,6 +43,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly metadataSyncInFlight = new Set<string>();
   private readonly outputSyncInFlight = new Set<string>();
+  private testPromptResponses: InteractivePromptResponse[] = [];
+  private readonly testPromptRequests: InteractivePromptRequest[] = [];
   private executionOrder = 0;
   private readonly controller: vscode.NotebookController;
 
@@ -185,6 +193,22 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
   public showOutputChannel(): void {
     this.outputChannelController.reveal();
+  }
+
+  public setTestPromptResponses(responses: InteractivePromptResponse[]): void {
+    this.testPromptResponses = [...responses];
+    this.testPromptRequests.length = 0;
+  }
+
+  public clearTestPromptResponses(): void {
+    this.testPromptResponses = [];
+    this.testPromptRequests.length = 0;
+  }
+
+  public takeTestPromptRequests(): InteractivePromptRequest[] {
+    const requests = [...this.testPromptRequests];
+    this.testPromptRequests.length = 0;
+    return requests;
   }
 
   public async editChunkHeader(documentUri?: string, chunkId?: string, overrideHeaderInfo?: string): Promise<void> {
@@ -337,7 +361,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         code: cell.document.getText(),
         header: entry.chunk.header,
         artifactDirectory: await this.outputStore.getArtifactDirectory(notebook.uri.toString()),
-        plot: resolvePlotRenderOptions(chunkOptions)
+        plot: resolvePlotRenderOptions(chunkOptions),
+        prompt: (request) => this.promptForChunkInput(notebook, cell, entry.chunk, request)
       });
 
       const filteredResult = applyChunkOptionsToResult(result, chunkOptions);
@@ -404,6 +429,53 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     await executor.disposeSession(notebook.uri.toString());
     void vscode.window.setStatusBarMessage("Rmd Notebooks: restarted R session", 2500);
+  }
+
+  private async promptForChunkInput(
+    notebook: vscode.NotebookDocument,
+    cell: vscode.NotebookCell,
+    chunk: ExecutableChunk,
+    request: InteractivePromptRequest
+  ): Promise<InteractivePromptResponse> {
+    this.testPromptRequests.push(request);
+    const queuedTestResponse = this.testPromptResponses.shift();
+    if (queuedTestResponse) {
+      return queuedTestResponse;
+    }
+
+    const label = chunk.label ?? `cell ${cell.index + 1}`;
+    const title = request.title?.trim() || `Rmd Notebooks: ${label}`;
+
+    if (request.kind === "input") {
+      const value = await vscode.window.showInputBox({
+        title,
+        prompt: request.prompt,
+        placeHolder: request.placeHolder,
+        value: request.defaultValue,
+        ignoreFocusOut: true
+      });
+
+      return value === undefined
+        ? { cancelled: true }
+        : { cancelled: false, value };
+    }
+
+    const choiceItems = buildPromptQuickPickItems(request.choices);
+    const picked = await vscode.window.showQuickPick(choiceItems, {
+      title,
+      placeHolder: request.prompt,
+      ignoreFocusOut: true,
+      matchOnDescription: true
+    });
+
+    if (!picked) {
+      return { cancelled: true };
+    }
+
+    return {
+      cancelled: false,
+      value: picked.value
+    };
   }
 
   private async refreshNotebook(notebook: vscode.NotebookDocument): Promise<NotebookSnapshot> {
@@ -649,6 +721,25 @@ function resolvePlotRenderOptions(options: InlineChunksCodeCellMetadata["options
     heightInches,
     dpi
   };
+}
+
+function buildPromptQuickPickItems(
+  choices?: InteractivePromptChoice[]
+): Array<vscode.QuickPickItem & { value: string }> {
+  if (!choices || choices.length === 0) {
+    return [
+      {
+        label: "Confirm",
+        value: "1"
+      }
+    ];
+  }
+
+  return choices.map((choice) => ({
+    label: choice.label,
+    description: choice.description,
+    value: choice.value
+  }));
 }
 
 

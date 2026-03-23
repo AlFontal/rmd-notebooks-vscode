@@ -3,12 +3,23 @@ import * as readline from "node:readline";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as vscode from "vscode";
 import { ErrorOutputItem, HtmlOutputItem, ImageOutputItem, OutputItem, TextOutputItem } from "../document/chunkTypes";
-import { Executor, ExecutionContext, ExecutionResult } from "./executorTypes";
+import {
+  Executor,
+  ExecutionContext,
+  ExecutionResult,
+  InteractivePromptChoice,
+  InteractivePromptRequest,
+  InteractivePromptResponse
+} from "./executorTypes";
 import { InteractiveExecutionError } from "./executionErrors";
 
 const READY_MARKER = "RMD_NOTEBOOKS_READY";
 const RESULT_START_MARKER = "RMD_NOTEBOOKS_RESULT_START";
 const RESULT_END_MARKER = "RMD_NOTEBOOKS_RESULT_END";
+const PROMPT_START_MARKER = "RMD_NOTEBOOKS_PROMPT_START";
+const PROMPT_END_MARKER = "RMD_NOTEBOOKS_PROMPT_END";
+const PROMPT_RESPONSE_START_MARKER = "RMD_NOTEBOOKS_PROMPT_RESPONSE_START";
+const PROMPT_RESPONSE_END_MARKER = "RMD_NOTEBOOKS_PROMPT_RESPONSE_END";
 const COMMAND_MARKER = "RMD_NOTEBOOKS_COMMAND_V1";
 const COMMAND_END_MARKER = "RMD_NOTEBOOKS_END";
 
@@ -43,7 +54,14 @@ export class RExecutor implements Executor {
     let payload: RawExecutionPayload;
 
     try {
-      payload = await session.execute(context.code, context.workspaceFolder, context.artifactDirectory, context.plot, timeoutMs);
+      payload = await session.execute(
+        context.code,
+        context.workspaceFolder,
+        context.artifactDirectory,
+        context.plot,
+        timeoutMs,
+        context.prompt
+      );
     } catch (error) {
       if (error instanceof InteractiveExecutionError) {
         this.sessions.delete(context.documentUri);
@@ -131,9 +149,14 @@ class RSession {
     reject: (error: Error) => void;
   } | undefined;
   private currentLines: string[] = [];
+  private currentPromptLines: string[] = [];
   private waitingForResult = false;
+  private waitingForPrompt = false;
   private startupErrors: string[] = [];
   private readonly startTimer: NodeJS.Timeout;
+  private promptHandler: ((request: InteractivePromptRequest) => Promise<InteractivePromptResponse>) | undefined;
+  private executionTimeout: NodeJS.Timeout | undefined;
+  private executionTimeoutMs = 0;
 
   public constructor(rPath: string, scriptPath: string) {
     this.process = spawn(rPath, ["--slave", "--vanilla"], {
@@ -157,6 +180,8 @@ class RSession {
     this.process.stderr.on("data", (chunk) => {
       this.startupErrors.push(chunk.toString());
       if (this.pending) {
+        this.clearExecutionTimeout();
+        this.promptHandler = undefined;
         this.pending.reject(new Error(chunk.toString()));
         this.pending = undefined;
       }
@@ -164,6 +189,8 @@ class RSession {
     this.process.on("error", (error) => {
       this.readyReject(error);
       if (this.pending) {
+        this.clearExecutionTimeout();
+        this.promptHandler = undefined;
         this.pending.reject(error);
         this.pending = undefined;
       }
@@ -171,6 +198,8 @@ class RSession {
     this.process.on("exit", (code, signal) => {
       const message = `R session exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"}).`;
       if (this.pending) {
+        this.clearExecutionTimeout();
+        this.promptHandler = undefined;
         this.pending.reject(new Error(message));
         this.pending = undefined;
       }
@@ -190,7 +219,8 @@ class RSession {
     workingDirectory?: string,
     artifactDirectory?: string,
     plot?: ExecutionContext["plot"],
-    timeoutMs = 15000
+    timeoutMs = 15000,
+    promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>
   ): Promise<RawExecutionPayload> {
     await this.ready();
     if (this.pending) {
@@ -198,18 +228,10 @@ class RSession {
     }
 
     return new Promise<RawExecutionPayload>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!this.pending) {
-          return;
-        }
-
-        this.pending = undefined;
-        this.waitingForResult = false;
-        this.currentLines = [];
-        reject(new InteractiveExecutionError(`Inline execution timed out after ${timeoutMs}ms and may need interactive input.`));
-      }, timeoutMs);
-
       this.pending = { resolve, reject };
+      this.promptHandler = promptHandler;
+      this.executionTimeoutMs = timeoutMs;
+      this.armExecutionTimeout();
       this.process.stdin.write(`${COMMAND_MARKER}\n`);
       this.process.stdin.write(`${workingDirectory ?? ""}\n`);
       this.process.stdin.write(`${artifactDirectory ?? ""}\n`);
@@ -226,11 +248,13 @@ class RSession {
       const originalReject = reject;
       this.pending = {
         resolve: (payload) => {
-          clearTimeout(timeout);
+          this.clearExecutionTimeout();
+          this.promptHandler = undefined;
           originalResolve(payload);
         },
         reject: (error) => {
-          clearTimeout(timeout);
+          this.clearExecutionTimeout();
+          this.promptHandler = undefined;
           originalReject(error);
         }
       };
@@ -256,6 +280,21 @@ class RSession {
       return;
     }
 
+    if (line === PROMPT_START_MARKER) {
+      this.waitingForPrompt = true;
+      this.currentPromptLines = [];
+      this.clearExecutionTimeout();
+      return;
+    }
+
+    if (line === PROMPT_END_MARKER) {
+      this.waitingForPrompt = false;
+      const promptLines = [...this.currentPromptLines];
+      this.currentPromptLines = [];
+      void this.handlePromptRequest(promptLines);
+      return;
+    }
+
     if (line === RESULT_END_MARKER) {
       this.waitingForResult = false;
       const pending = this.pending;
@@ -275,9 +314,88 @@ class RSession {
       return;
     }
 
+    if (this.waitingForPrompt) {
+      this.currentPromptLines.push(line);
+      return;
+    }
+
     if (this.waitingForResult) {
       this.currentLines.push(line);
     }
+  }
+
+  private armExecutionTimeout(): void {
+    this.clearExecutionTimeout();
+    if (this.executionTimeoutMs <= 0) {
+      return;
+    }
+
+    this.executionTimeout = setTimeout(() => {
+      const pending = this.pending;
+      if (!pending) {
+        return;
+      }
+
+      const hadPromptOpen = this.waitingForPrompt;
+      this.pending = undefined;
+      this.promptHandler = undefined;
+      this.waitingForResult = false;
+      this.waitingForPrompt = false;
+      this.currentLines = [];
+      this.currentPromptLines = [];
+      if (hadPromptOpen) {
+        this.writePromptResponse({ cancelled: true });
+      }
+      pending.reject(
+        new InteractiveExecutionError(
+          `Inline execution timed out after ${this.executionTimeoutMs}ms and may need interactive input.`
+        )
+      );
+    }, this.executionTimeoutMs);
+  }
+
+  private clearExecutionTimeout(): void {
+    if (this.executionTimeout) {
+      clearTimeout(this.executionTimeout);
+      this.executionTimeout = undefined;
+    }
+  }
+
+  private async handlePromptRequest(lines: string[]): Promise<void> {
+    const pending = this.pending;
+    if (!pending) {
+      return;
+    }
+
+    let request: InteractivePromptRequest;
+    try {
+      request = parsePromptRequest(lines);
+    } catch (error) {
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+      this.pending = undefined;
+      this.promptHandler = undefined;
+      return;
+    }
+
+    try {
+      const response = this.promptHandler
+        ? await this.promptHandler(request)
+        : { cancelled: true } satisfies InteractivePromptResponse;
+      this.writePromptResponse(response);
+      this.armExecutionTimeout();
+    } catch (error) {
+      this.writePromptResponse({ cancelled: true });
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+      this.pending = undefined;
+      this.promptHandler = undefined;
+    }
+  }
+
+  private writePromptResponse(response: InteractivePromptResponse): void {
+    this.process.stdin.write(`${PROMPT_RESPONSE_START_MARKER}\n`);
+    this.process.stdin.write(`STATUS:${response.cancelled ? "cancelled" : "ok"}\n`);
+    this.process.stdin.write(`VALUE:${sanitizePromptValue(response.value)}\n`);
+    this.process.stdin.write(`${PROMPT_RESPONSE_END_MARKER}\n`);
   }
 }
 
@@ -320,6 +438,65 @@ function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
     html: (sections.get("HTML") ?? []).join("\n"),
     plots: (sections.get("PLOTS") ?? []).filter((entry) => entry.trim().length > 0)
   };
+}
+
+function parsePromptRequest(lines: string[]): InteractivePromptRequest {
+  const metadata = new Map<string, string>();
+  const sections = new Map<string, string[]>();
+  let currentSection: string | undefined;
+
+  for (const line of lines) {
+    const sectionStart = line.match(/^SECTION:([A-Z_]+):START$/);
+    if (sectionStart) {
+      currentSection = sectionStart[1];
+      sections.set(currentSection, []);
+      continue;
+    }
+
+    const sectionEnd = line.match(/^SECTION:([A-Z_]+):END$/);
+    if (sectionEnd) {
+      currentSection = undefined;
+      continue;
+    }
+
+    if (currentSection) {
+      sections.get(currentSection)?.push(line);
+      continue;
+    }
+
+    const separatorIndex = line.indexOf(":");
+    if (separatorIndex > 0) {
+      metadata.set(line.slice(0, separatorIndex), line.slice(separatorIndex + 1));
+    }
+  }
+
+  const kind = metadata.get("KIND");
+  if (kind !== "select" && kind !== "input" && kind !== "confirm") {
+    throw new Error(`Unsupported interactive prompt kind "${kind ?? ""}".`);
+  }
+
+  const choiceLabels = sections.get("CHOICE_LABELS") ?? [];
+  const choiceValues = sections.get("CHOICE_VALUES") ?? [];
+  const choices: InteractivePromptChoice[] = choiceLabels.map((label, index) => ({
+    label,
+    value: choiceValues[index] ?? label
+  }));
+  const promptLines = sections.get("PROMPT") ?? [];
+  const titleLines = sections.get("TITLE") ?? [];
+
+  return {
+    kind,
+    title: titleLines.length > 0 ? titleLines.join("\n") : undefined,
+    prompt: promptLines.join("\n").trim() || "Interactive input requested",
+    placeHolder: metadata.get("PLACEHOLDER") || undefined,
+    defaultValue: metadata.get("DEFAULT") || undefined,
+    allowEmpty: metadata.get("ALLOW_EMPTY") !== "0",
+    choices: choices.length > 0 ? choices : undefined
+  };
+}
+
+function sanitizePromptValue(value?: string): string {
+  return (value ?? "").replace(/\r?\n/g, " ");
 }
 
 function escapeRString(value: string): string {

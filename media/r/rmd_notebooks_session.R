@@ -45,6 +45,164 @@ rmd_notebooks_collect_plot_paths <- function(directory, started_at) {
   keep
 }
 
+rmd_notebooks_read_prompt_response <- function() {
+  start <- readLines(con = stdin(), n = 1, warn = FALSE)
+  if (length(start) == 0 || !identical(start, "RMD_NOTEBOOKS_PROMPT_RESPONSE_START")) {
+    return(list(cancelled = TRUE, value = ""))
+  }
+
+  status <- readLines(con = stdin(), n = 1, warn = FALSE)
+  value <- readLines(con = stdin(), n = 1, warn = FALSE)
+  end <- readLines(con = stdin(), n = 1, warn = FALSE)
+
+  if (length(end) == 0 || !identical(end, "RMD_NOTEBOOKS_PROMPT_RESPONSE_END")) {
+    return(list(cancelled = TRUE, value = ""))
+  }
+
+  list(
+    cancelled = identical(sub("^STATUS:", "", status), "cancelled"),
+    value = sub("^VALUE:", "", value)
+  )
+}
+
+rmd_notebooks_emit_protocol_lines <- function(lines) {
+  output_connection <- get0("active_stdout_connection", envir = state_env, inherits = FALSE)
+  message_connection <- get0("active_stderr_connection", envir = state_env, inherits = FALSE)
+  output_was_sunk <- sink.number() > 0
+  message_was_sunk <- sink.number(type = "message") > 2
+
+  if (message_was_sunk) {
+    sink(type = "message")
+  }
+  if (output_was_sunk) {
+    sink()
+  }
+
+  on.exit({
+    if (output_was_sunk && !is.null(output_connection)) {
+      sink(output_connection)
+    }
+    if (message_was_sunk && !is.null(message_connection)) {
+      sink(message_connection, type = "message")
+    }
+  }, add = TRUE)
+
+  for (line in lines) {
+    cat(line, "\n", sep = "")
+  }
+  flush.console()
+}
+
+rmd_notebooks_request_prompt <- function(kind, prompt, choice_labels = character(), choice_values = character(), title = NULL, default = "", allow_empty = TRUE, placeholder = NULL) {
+  protocol_lines <- c(
+    "RMD_NOTEBOOKS_PROMPT_START",
+    sprintf("KIND:%s", kind),
+    sprintf("ALLOW_EMPTY:%s", if (isTRUE(allow_empty)) "1" else "0"),
+    sprintf("DEFAULT:%s", paste(default, collapse = " ")),
+    sprintf("PLACEHOLDER:%s", paste(if (is.null(placeholder)) "" else placeholder, collapse = " ")),
+    "SECTION:TITLE:START",
+    if (!is.null(title) && nzchar(title)) title else character(),
+    "SECTION:TITLE:END",
+    "SECTION:PROMPT:START",
+    prompt,
+    "SECTION:PROMPT:END",
+    "SECTION:CHOICE_LABELS:START",
+    choice_labels,
+    "SECTION:CHOICE_LABELS:END",
+    "SECTION:CHOICE_VALUES:START",
+    choice_values,
+    "SECTION:CHOICE_VALUES:END",
+    "RMD_NOTEBOOKS_PROMPT_END"
+  )
+  rmd_notebooks_emit_protocol_lines(protocol_lines)
+  rmd_notebooks_read_prompt_response()
+}
+
+rmd_notebooks_readline <- function(prompt = "") {
+  prompt_text <- paste(prompt, collapse = "\n")
+  if (nzchar(prompt_text)) {
+    cat(prompt_text, "\n", sep = "")
+  }
+
+  response <- rmd_notebooks_request_prompt(
+    kind = "input",
+    prompt = if (nzchar(prompt_text)) prompt_text else "Enter a value",
+    title = "Input Required",
+    allow_empty = TRUE,
+    placeholder = "Type a response"
+  )
+
+  if (isTRUE(response$cancelled)) {
+    return("")
+  }
+
+  response$value
+}
+
+rmd_notebooks_menu <- function(choices, graphics = FALSE, title = NULL) {
+  labels <- as.character(choices)
+  values <- as.character(seq_along(labels))
+  prompt_lines <- c(
+    if (!is.null(title) && nzchar(title)) title else "Make a selection",
+    paste(sprintf("%d: %s", seq_along(labels), labels), collapse = "\n")
+  )
+  cat(paste(prompt_lines, collapse = "\n"), "\n", sep = "")
+
+  response <- rmd_notebooks_request_prompt(
+    kind = "select",
+    prompt = if (!is.null(title) && nzchar(title)) title else "Select an option",
+    choice_labels = labels,
+    choice_values = values,
+    title = "Selection",
+    allow_empty = TRUE,
+    placeholder = "Press Enter to confirm or Escape to cancel"
+  )
+
+  if (isTRUE(response$cancelled) || !nzchar(response$value)) {
+    return(0L)
+  }
+
+  suppressWarnings(as.integer(response$value))
+}
+
+rmd_notebooks_ask_yes_no <- function(msg, default = NA, ...) {
+  prompt_text <- paste(msg, collapse = "\n")
+  cat(prompt_text, "\n", sep = "")
+
+  response <- rmd_notebooks_request_prompt(
+    kind = "confirm",
+    prompt = prompt_text,
+    choice_labels = c("Yes", "No"),
+    choice_values = c("yes", "no"),
+    title = "Confirmation",
+    allow_empty = is.na(default),
+    placeholder = "Choose Yes or No"
+  )
+
+  if (isTRUE(response$cancelled) || !nzchar(response$value)) {
+    return(default)
+  }
+
+  identical(response$value, "yes")
+}
+
+rmd_notebooks_patch_binding <- function(environment, name, value) {
+  if (!exists(name, envir = environment, inherits = FALSE)) {
+    return(invisible(FALSE))
+  }
+
+  was_locked <- bindingIsLocked(name, environment)
+  if (was_locked) {
+    unlockBinding(name, environment)
+  }
+  assign(name, value, envir = environment)
+  if (was_locked) {
+    lockBinding(name, environment)
+  }
+
+  invisible(TRUE)
+}
+
 rmd_notebooks_execute <- function(code, working_directory, artifact_directory, plot_width_in, plot_height_in, plot_dpi) {
   if (nzchar(working_directory) && dir.exists(working_directory)) {
     setwd(working_directory)
@@ -60,6 +218,8 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
   html_buffer <- character()
   stdout_connection <- textConnection("stdout_buffer", "w", local = TRUE)
   stderr_connection <- textConnection("stderr_buffer", "w", local = TRUE)
+  assign("active_stdout_connection", stdout_connection, envir = state_env)
+  assign("active_stderr_connection", stderr_connection, envir = state_env)
   width_in <- if (is.finite(plot_width_in) && plot_width_in > 0) plot_width_in else 10
   height_in <- if (is.finite(plot_height_in) && plot_height_in > 0) plot_height_in else 7.5
   dpi <- if (is.finite(plot_dpi) && plot_dpi > 0) plot_dpi else 96
@@ -108,6 +268,7 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
   sink()
   close(stdout_connection)
   close(stderr_connection)
+  rm(list = c("active_stdout_connection", "active_stderr_connection"), envir = state_env)
 
   list(
     success = success,
@@ -125,6 +286,13 @@ assign("rmd_notebooks_html", function(html) {
 }, envir = state_env)
 
 assign("inline_chunks_html", get("rmd_notebooks_html", envir = state_env), envir = state_env)
+assign("readline", rmd_notebooks_readline, envir = state_env)
+assign("menu", rmd_notebooks_menu, envir = state_env)
+assign("askYesNo", rmd_notebooks_ask_yes_no, envir = state_env)
+
+rmd_notebooks_patch_binding(baseenv(), "readline", rmd_notebooks_readline)
+rmd_notebooks_patch_binding(asNamespace("utils"), "menu", rmd_notebooks_menu)
+rmd_notebooks_patch_binding(asNamespace("utils"), "askYesNo", rmd_notebooks_ask_yes_no)
 
 cat("RMD_NOTEBOOKS_READY\n")
 flush.console()

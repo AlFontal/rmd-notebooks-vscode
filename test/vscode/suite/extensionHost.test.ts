@@ -17,6 +17,21 @@ interface InlineChunksExtensionApi {
     }>;
     outputChannelText: string;
   }>;
+  setTestPromptResponses(responses: Array<{ cancelled?: boolean; value?: string }>): void;
+  clearTestPromptResponses(): void;
+  takeTestPromptRequests(): Array<{
+    kind: string;
+    title?: string;
+    prompt: string;
+    placeHolder?: string;
+    defaultValue?: string;
+    allowEmpty?: boolean;
+    choices?: Array<{
+      label: string;
+      value: string;
+      description?: string;
+    }>;
+  }>;
 }
 
 let extensionApi: InlineChunksExtensionApi;
@@ -73,6 +88,7 @@ describe("Rmd Notebooks Notebook Host", () => {
   });
 
   afterEach(async () => {
+    extensionApi.clearTestPromptResponses();
     await vscode.commands.executeCommand("workbench.action.closeAllEditors");
     vscode.window.terminals.forEach((terminal) => terminal.dispose());
   });
@@ -387,6 +403,93 @@ describe("Rmd Notebooks Notebook Host", () => {
     );
 
     assert.ok(state.outputs.some((record) => record.outputTypes.includes("text")));
+  });
+
+  it("handles menu() prompts inline with a selection picker", async () => {
+    await writeFixture(
+      "interactive-menu.qmd",
+      [
+        "# Interactive menu",
+        "",
+        "```{r chooser}",
+        "selection <- menu(c('alpha', 'beta'), title = 'Choose a package')",
+        "cat(sprintf('selection=%s\\n', selection))",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    extensionApi.setTestPromptResponses([{ value: "2" }]);
+
+    const editor = await openNotebookEditor("interactive-menu.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success" && record.outputTypes.includes("text"))
+    );
+
+    const codeCell = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
+    const renderedCell = await waitForNotebookOutput(codeCell, (cell) =>
+      cell.outputs.some((output) =>
+        output.items.some((item) => item.mime === "application/vnd.code.notebook.stdout")
+      )
+    );
+
+    const promptRequests = extensionApi.takeTestPromptRequests();
+    assert.ok(promptRequests.some((request) => request.kind === "select" && request.prompt.includes("Choose a package")));
+    assert.ok(promptRequests.some((request) => request.choices?.some((choice) => choice.label === "beta" && choice.value === "2")));
+    assert.ok(state.outputChannelText.includes("selection=2"));
+    assert.ok(
+      renderedCell.outputs.some((output) =>
+        output.items.some((item) => Buffer.from(item.data).toString("utf8").includes("selection=2"))
+      )
+    );
+    assert.equal(vscode.window.terminals.length, 0);
+  });
+
+  it("handles readline() prompts inline with a text input", async () => {
+    await writeFixture(
+      "interactive-readline.qmd",
+      [
+        "# Interactive readline",
+        "",
+        "```{r reader}",
+        "value <- readline('Package name?')",
+        "cat(sprintf('value=%s\\n', value))",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    extensionApi.setTestPromptResponses([{ value: "dplyr" }]);
+
+    const editor = await openNotebookEditor("interactive-readline.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success" && record.outputTypes.includes("text"))
+    );
+
+    const codeCell = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
+    const renderedCell = await waitForNotebookOutput(codeCell, (cell) =>
+      cell.outputs.some((output) =>
+        output.items.some((item) => item.mime === "application/vnd.code.notebook.stdout")
+      )
+    );
+
+    const promptRequests = extensionApi.takeTestPromptRequests();
+    assert.ok(promptRequests.some((request) => request.kind === "input" && request.prompt.includes("Package name?")));
+    assert.ok(state.outputChannelText.includes("value=dplyr"));
+    assert.ok(
+      renderedCell.outputs.some((output) =>
+        output.items.some((item) => Buffer.from(item.data).toString("utf8").includes("value=dplyr"))
+      )
+    );
+    assert.equal(vscode.window.terminals.length, 0);
   });
 });
 
