@@ -89,6 +89,10 @@ function getStateLabel(record: ChunkOutputRecord): string | undefined {
     return "[running]";
   }
 
+  if (record.status === "redirected") {
+    return "[redirected]";
+  }
+
   if (record.stale) {
     return "[stale]";
   }

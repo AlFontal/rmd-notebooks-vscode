@@ -37,6 +37,8 @@ interface NotebookSnapshot {
   generatedAt: number;
 }
 
+type ExecuteCellOutcome = "completed" | "redirected";
+
 export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private readonly snapshots = new Map<string, NotebookSnapshot>();
   private readonly outputsByDocument = new Map<string, Map<string, ChunkOutputRecord>>();
@@ -103,7 +105,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     const snapshot = await this.refreshNotebook(notebook);
     for (const entry of snapshot.chunks) {
-      await this.executeCell(notebook, entry.cell);
+      const outcome = await this.executeCell(notebook, entry.cell);
+      if (outcome === "redirected") {
+        break;
+      }
     }
   }
 
@@ -296,15 +301,15 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     await executor?.disposeSession?.(notebook.uri.toString());
   }
 
-  private async executeCell(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell): Promise<void> {
+  private async executeCell(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell): Promise<ExecuteCellOutcome> {
     if (cell.kind !== vscode.NotebookCellKind.Code) {
-      return;
+      return "completed";
     }
 
     const snapshot = await this.refreshNotebook(notebook);
     const entry = snapshot.chunks.find((candidate) => candidate.index === cell.index);
     if (!entry) {
-      return;
+      return "completed";
     }
 
     const outputs = await this.ensureOutputsLoaded(notebook.uri.toString());
@@ -312,7 +317,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     const chunkOptions = getChunkOptions(cell);
     const selected = await this.ensureControllerSelected(notebook);
     if (!selected) {
-      return;
+      return "completed";
     }
     const execution = this.controller.createNotebookCellExecution(notebook.cellAt(entry.index));
     execution.executionOrder = ++this.executionOrder;
@@ -327,7 +332,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       });
       execution.end(true, Date.now());
       void vscode.window.setStatusBarMessage(`Rmd Notebooks: skipped ${entry.chunk.label ?? "cell"} because eval=FALSE`, 2500);
-      return;
+      return "completed";
     }
 
     if (!executor) {
@@ -344,7 +349,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       });
       execution.end(false, Date.now());
       this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
-      return;
+      return "completed";
     }
 
     const runningRecord = createRecord(entry.chunk, "running", []);
@@ -378,11 +383,12 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       });
       execution.end(filteredResult.success, filteredResult.finishedAt);
       this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
+      return "completed";
     } catch (error) {
       if (error instanceof InteractiveExecutionError) {
-        const record = await this.handleInteractiveFallback(notebook, cell, entry.chunk, outputs, execution, error.message);
-        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
-        return;
+        const fallback = await this.handleInteractiveFallback(notebook, cell, entry.chunk, outputs, execution, error.message);
+        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, fallback.record);
+        return fallback.launchedTerminal ? "redirected" : "completed";
       }
 
       const record = createRecord(entry.chunk, "error", [
@@ -398,6 +404,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       });
       execution.end(false, Date.now());
       this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
+      return "completed";
     }
   }
 
@@ -652,7 +659,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     outputs: Map<string, ChunkOutputRecord>,
     execution: vscode.NotebookCellExecution,
     message: string
-  ): Promise<ChunkOutputRecord> {
+  ): Promise<{ record: ChunkOutputRecord; launchedTerminal: boolean }> {
     const behavior = vscode.workspace.getConfiguration("rmdNotebooks").get<"prompt" | "terminal" | "error">(
       "execution.interactiveFallbackBehavior",
       "prompt"
@@ -675,7 +682,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       }
     }
 
-    const record = createRecord(chunk, launchedTerminal ? "success" : "error", [
+    const record = createRecord(chunk, launchedTerminal ? "redirected" : "error", [
       {
         type: launchedTerminal ? "text" : "error",
         text: launchedTerminal
@@ -690,7 +697,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       await execution.replaceOutput(await createNotebookOutputs(record));
     });
     execution.end(launchedTerminal, Date.now());
-    return record;
+    return { record, launchedTerminal };
   }
 }
 
