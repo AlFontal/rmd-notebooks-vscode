@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5
+
+- stop `Run All Chunks` after terminal redirection so later cells do not continue in a mismatched inline session
+- harden the R session protocol against marker-like output collisions and preserve runtime stderr as chunk output
+- switch the VS Code extension-host test launcher to `@vscode/test-electron` and document the macOS sandbox caveat for local verification
+
 ## 0.1.4
 
 - support inline prompt UI for common R interactions such as `menu()` and `readline()`
