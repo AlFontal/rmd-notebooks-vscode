@@ -2,14 +2,21 @@ state_env <- new.env(parent = globalenv())
 
 options(menu.graphics = FALSE)
 
+rmd_notebooks_encode_line <- function(value) {
+  utils::URLencode(enc2utf8(value), reserved = TRUE)
+}
+
+rmd_notebooks_decode_line <- function(value) {
+  utils::URLdecode(value)
+}
+
 rmd_notebooks_emit_section <- function(name, lines) {
-  cat(sprintf("SECTION:%s:START\n", name))
+  cat(sprintf("SECTION:%s:COUNT:%d\n", name, length(lines)))
   if (length(lines) > 0) {
     for (line in lines) {
-      cat(line, "\n", sep = "")
+      cat("LINE:", rmd_notebooks_encode_line(line), "\n", sep = "")
     }
   }
-  cat(sprintf("SECTION:%s:END\n", name))
 }
 
 rmd_notebooks_render_html <- function(value) {
@@ -100,18 +107,14 @@ rmd_notebooks_request_prompt <- function(kind, prompt, choice_labels = character
     sprintf("ALLOW_EMPTY:%s", if (isTRUE(allow_empty)) "1" else "0"),
     sprintf("DEFAULT:%s", paste(default, collapse = " ")),
     sprintf("PLACEHOLDER:%s", paste(if (is.null(placeholder)) "" else placeholder, collapse = " ")),
-    "SECTION:TITLE:START",
-    if (!is.null(title) && nzchar(title)) title else character(),
-    "SECTION:TITLE:END",
-    "SECTION:PROMPT:START",
-    prompt,
-    "SECTION:PROMPT:END",
-    "SECTION:CHOICE_LABELS:START",
-    choice_labels,
-    "SECTION:CHOICE_LABELS:END",
-    "SECTION:CHOICE_VALUES:START",
-    choice_values,
-    "SECTION:CHOICE_VALUES:END",
+    sprintf("SECTION:TITLE:COUNT:%d", if (!is.null(title) && nzchar(title)) 1 else 0),
+    if (!is.null(title) && nzchar(title)) sprintf("LINE:%s", rmd_notebooks_encode_line(title)) else character(),
+    sprintf("SECTION:PROMPT:COUNT:%d", length(prompt)),
+    vapply(prompt, function(line) sprintf("LINE:%s", rmd_notebooks_encode_line(line)), character(1), USE.NAMES = FALSE),
+    sprintf("SECTION:CHOICE_LABELS:COUNT:%d", length(choice_labels)),
+    vapply(choice_labels, function(line) sprintf("LINE:%s", rmd_notebooks_encode_line(line)), character(1), USE.NAMES = FALSE),
+    sprintf("SECTION:CHOICE_VALUES:COUNT:%d", length(choice_values)),
+    vapply(choice_values, function(line) sprintf("LINE:%s", rmd_notebooks_encode_line(line)), character(1), USE.NAMES = FALSE),
     "RMD_NOTEBOOKS_PROMPT_END"
   )
   rmd_notebooks_emit_protocol_lines(protocol_lines)
@@ -312,20 +315,38 @@ repeat {
   plot_width_in <- readLines(con = stdin(), n = 1, warn = FALSE)
   plot_height_in <- readLines(con = stdin(), n = 1, warn = FALSE)
   plot_dpi <- readLines(con = stdin(), n = 1, warn = FALSE)
-  code_lines <- character()
+  code_count_line <- readLines(con = stdin(), n = 1, warn = FALSE)
 
-  repeat {
-    line <- readLines(con = stdin(), n = 1, warn = FALSE)
-    if (length(line) == 0 || identical(line, "RMD_NOTEBOOKS_END")) {
-      break
+  working_directory <- sub("^WORKDIR:", "", working_directory)
+  artifact_directory <- sub("^ARTIFACT_DIR:", "", artifact_directory)
+  plot_width_in <- sub("^PLOT_WIDTH:", "", plot_width_in)
+  plot_height_in <- sub("^PLOT_HEIGHT:", "", plot_height_in)
+  plot_dpi <- sub("^PLOT_DPI:", "", plot_dpi)
+  code_count <- suppressWarnings(as.integer(sub("^CODE_COUNT:", "", code_count_line)))
+  if (!is.finite(code_count) || code_count < 0) {
+    code_count <- 0L
+  }
+
+  code_lines <- character()
+  if (code_count > 0) {
+    for (index in seq_len(code_count)) {
+      line <- readLines(con = stdin(), n = 1, warn = FALSE)
+      if (length(line) == 0) {
+        break
+      }
+      code_lines <- c(code_lines, rmd_notebooks_decode_line(sub("^LINE:", "", line)))
     }
-    code_lines <- c(code_lines, line)
+  }
+
+  command_end <- readLines(con = stdin(), n = 1, warn = FALSE)
+  if (length(command_end) == 0 || !identical(command_end, "RMD_NOTEBOOKS_END")) {
+    next
   }
 
   result <- rmd_notebooks_execute(
     paste(code_lines, collapse = "\n"),
-    working_directory,
-    artifact_directory,
+    rmd_notebooks_decode_line(working_directory),
+    rmd_notebooks_decode_line(artifact_directory),
     suppressWarnings(as.numeric(plot_width_in)),
     suppressWarnings(as.numeric(plot_height_in)),
     suppressWarnings(as.numeric(plot_dpi))

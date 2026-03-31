@@ -1,44 +1,35 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
-import { downloadAndUnzipVSCode } from "@vscode/test-electron";
+import { runTests } from "@vscode/test-electron";
 
 async function main(): Promise<void> {
   const extensionDevelopmentPath = path.resolve(__dirname, "../../..");
   const extensionTestsPath = path.resolve(__dirname, "./suite/index");
   const workspacePath = await createWorkspaceFixture();
-  const downloadedExecutablePath = await downloadAndUnzipVSCode("1.112.0");
-  const appPath = resolveVsCodeAppPath(downloadedExecutablePath);
-  const cliPath = resolveVsCodeCliPath(appPath);
-  const testRuntimePath = await fs.mkdtemp(path.join(os.tmpdir(), "rmd-notebooks-vscode-runtime-"));
   const resultFilePath = path.resolve(__dirname, ".vscode-test-result.json");
   const proofFilePath = "/tmp/rmd-notebooks-vscode-proof.txt";
-  const userDataDir = path.join(testRuntimePath, "user-data");
-  const extensionsDir = path.join(testRuntimePath, "extensions");
 
   try {
-    await fs.mkdir(userDataDir, { recursive: true });
-    await fs.mkdir(extensionsDir, { recursive: true });
     await fs.rm(resultFilePath, { force: true });
     await fs.rm(proofFilePath, { force: true });
-    await launchVsCodeForTests(cliPath, [
-      "--wait",
-      "--disable-workspace-trust",
-      "--skip-welcome",
-      "--skip-release-notes",
-      "--disable-updates",
-      `--extensionTestsPath=${extensionTestsPath}`,
-      `--extensionDevelopmentPath=${extensionDevelopmentPath}`,
-      `--user-data-dir=${userDataDir}`,
-      `--extensions-dir=${extensionsDir}`,
-      workspacePath
-    ]);
+    await runTests({
+      version: "1.112.0",
+      extensionDevelopmentPath,
+      extensionTestsPath,
+      launchArgs: [
+        workspacePath,
+        "--disable-workspace-trust",
+        "--skip-welcome",
+        "--skip-release-notes",
+        "--disable-updates"
+      ],
+      reuseMachineInstall: false
+    });
     await assertSuccessfulTestResult(resultFilePath, proofFilePath);
     console.log("VS Code integration tests passed.");
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
-    await fs.rm(testRuntimePath, { recursive: true, force: true });
     await fs.rm(resultFilePath, { force: true });
   }
 }
@@ -107,45 +98,6 @@ async function copyFixture(root: string, workspacePath: string, sourceName: stri
   const sourcePath = path.join(root, sourceName);
   const targetPath = path.join(workspacePath, targetName);
   await fs.copyFile(sourcePath, targetPath);
-}
-
-function resolveVsCodeAppPath(executablePath: string): string {
-  return path.resolve(executablePath, "../../..");
-}
-
-function resolveVsCodeCliPath(appPath: string): string {
-  return path.join(appPath, "Contents", "Resources", "app", "bin", "code");
-}
-
-async function launchVsCodeForTests(
-  cliPath: string,
-  args: string[]
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(cliPath, args, {
-      env: process.env
-    });
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-      process.stdout.write(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-      process.stderr.write(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(`VS Code test launcher exited with code ${code}.\nSTDERR:\n${stderr}\nSTDOUT:\n${stdout}`.trim()));
-        return;
-      }
-
-      resolve();
-    });
-  });
 }
 
 async function assertSuccessfulTestResult(resultFilePath: string, proofFilePath: string): Promise<void> {

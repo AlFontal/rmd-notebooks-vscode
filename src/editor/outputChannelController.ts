@@ -32,6 +32,8 @@ export class OutputChannelController implements vscode.Disposable {
 
     if (record.status === "error") {
       void vscode.window.showErrorMessage(`Rmd Notebooks: ${getChunkDisplayName(chunk)} failed. See the Rmd Notebooks output panel.`);
+    } else if (record.status === "redirected") {
+      void vscode.window.setStatusBarMessage(`Rmd Notebooks: redirected ${getChunkDisplayName(chunk)} to the R terminal`, 3000);
     } else {
       void vscode.window.setStatusBarMessage(`Rmd Notebooks: finished ${getChunkDisplayName(chunk)}`, 2500);
     }

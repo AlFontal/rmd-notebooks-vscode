@@ -405,6 +405,76 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(state.outputs.some((record) => record.outputTypes.includes("text")));
   });
 
+  it("stops run-all after redirecting an interactive chunk to the R terminal", async () => {
+    await writeFixture(
+      "interactive-run-all.qmd",
+      [
+        "# Interactive run all",
+        "",
+        "```{r waiting}",
+        "Sys.sleep(2)",
+        "```",
+        "",
+        "```{r later}",
+        "cat('after redirect\\n')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    await updateTestSetting("execution.interactiveFallbackTimeoutMs", 1000);
+    await updateTestSetting("execution.interactiveFallbackBehavior", "terminal");
+
+    const editor = await openNotebookEditor("interactive-run-all.qmd");
+
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+
+    await waitFor(() => {
+      const terminal = vscode.window.terminals.find((candidate) => candidate.name === "Rmd Notebooks R");
+      return terminal ?? undefined;
+    }, 15000);
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "redirected")
+    );
+
+    assert.equal(state.outputs.length, 1);
+    assert.equal(state.outputs[0].status, "redirected");
+    assert.ok(!state.outputChannelText.includes("after redirect"));
+  });
+
+  it("preserves protocol marker text in stdout", async () => {
+    await writeFixture(
+      "protocol-markers.qmd",
+      [
+        "# Protocol markers",
+        "",
+        "```{r markers}",
+        "cat('SECTION:HTML:COUNT:1\\n')",
+        "cat('RMD_NOTEBOOKS_END\\n')",
+        "cat('LINE:%2Ftmp%2Fplot.png\\n')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("protocol-markers.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success" && record.outputTypes.includes("text"))
+    );
+
+    assert.ok(state.outputChannelText.includes("SECTION:HTML:COUNT:1"));
+    assert.ok(state.outputChannelText.includes("RMD_NOTEBOOKS_END"));
+    assert.ok(
+      state.outputChannelText.includes("LINE:%2Ftmp%2Fplot.png") ||
+      state.outputChannelText.includes("LINE:/tmp/plot.png")
+    );
+  });
+
   it("handles menu() prompts inline with a selection picker", async () => {
     await writeFixture(
       "interactive-menu.qmd",

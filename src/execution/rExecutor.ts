@@ -157,6 +157,8 @@ class RSession {
   private promptHandler: ((request: InteractivePromptRequest) => Promise<InteractivePromptResponse>) | undefined;
   private executionTimeout: NodeJS.Timeout | undefined;
   private executionTimeoutMs = 0;
+  private sessionReady = false;
+  private runtimeStderr = "";
 
   public constructor(rPath: string, scriptPath: string) {
     this.process = spawn(rPath, ["--slave", "--vanilla"], {
@@ -178,11 +180,18 @@ class RSession {
 
     this.lineReader.on("line", (line) => this.handleStdoutLine(line));
     this.process.stderr.on("data", (chunk) => {
-      this.startupErrors.push(chunk.toString());
-      if (this.pending) {
+      const text = chunk.toString();
+      if (!this.sessionReady) {
+        this.startupErrors.push(text);
+      } else if (this.pending) {
+        this.runtimeStderr += text;
+        return;
+      }
+
+      if (this.pending && !this.sessionReady) {
         this.clearExecutionTimeout();
         this.promptHandler = undefined;
-        this.pending.reject(new Error(chunk.toString()));
+        this.pending.reject(new Error(text));
         this.pending = undefined;
       }
     });
@@ -231,16 +240,18 @@ class RSession {
       this.pending = { resolve, reject };
       this.promptHandler = promptHandler;
       this.executionTimeoutMs = timeoutMs;
+      this.runtimeStderr = "";
       this.armExecutionTimeout();
       this.process.stdin.write(`${COMMAND_MARKER}\n`);
-      this.process.stdin.write(`${workingDirectory ?? ""}\n`);
-      this.process.stdin.write(`${artifactDirectory ?? ""}\n`);
-      this.process.stdin.write(`${plot?.widthInches ?? ""}\n`);
-      this.process.stdin.write(`${plot?.heightInches ?? ""}\n`);
-      this.process.stdin.write(`${plot?.dpi ?? ""}\n`);
-      this.process.stdin.write(code);
-      if (!code.endsWith("\n")) {
-        this.process.stdin.write("\n");
+      this.process.stdin.write(`WORKDIR:${encodeProtocolLine(workingDirectory ?? "")}\n`);
+      this.process.stdin.write(`ARTIFACT_DIR:${encodeProtocolLine(artifactDirectory ?? "")}\n`);
+      this.process.stdin.write(`PLOT_WIDTH:${plot?.widthInches ?? ""}\n`);
+      this.process.stdin.write(`PLOT_HEIGHT:${plot?.heightInches ?? ""}\n`);
+      this.process.stdin.write(`PLOT_DPI:${plot?.dpi ?? ""}\n`);
+      const codeLines = toProtocolLines(code);
+      this.process.stdin.write(`CODE_COUNT:${codeLines.length}\n`);
+      for (const line of codeLines) {
+        this.process.stdin.write(`LINE:${encodeProtocolLine(line)}\n`);
       }
       this.process.stdin.write(`${COMMAND_END_MARKER}\n`);
 
@@ -269,6 +280,7 @@ class RSession {
 
   private handleStdoutLine(line: string): void {
     if (line === READY_MARKER) {
+      this.sessionReady = true;
       clearTimeout(this.startTimer);
       this.readyResolve();
       return;
@@ -304,11 +316,16 @@ class RSession {
       }
 
       try {
-        pending.resolve(parseRawExecutionPayload(this.currentLines));
+        const payload = parseRawExecutionPayload(this.currentLines);
+        if (this.runtimeStderr.trim().length > 0) {
+          payload.stderr = payload.stderr.length > 0 ? `${payload.stderr}\n${this.runtimeStderr.trimEnd()}` : this.runtimeStderr.trimEnd();
+        }
+        pending.resolve(payload);
       } catch (error) {
         pending.reject(error instanceof Error ? error : new Error(String(error)));
       } finally {
         this.currentLines = [];
+        this.runtimeStderr = "";
       }
 
       return;
@@ -402,24 +419,18 @@ class RSession {
 function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
   const metadata = new Map<string, string>();
   const sections = new Map<string, string[]>();
-  let currentSection: string | undefined;
-
-  for (const line of lines) {
-    const sectionStart = line.match(/^SECTION:([A-Z_]+):START$/);
-    if (sectionStart) {
-      currentSection = sectionStart[1];
-      sections.set(currentSection, []);
-      continue;
-    }
-
-    const sectionEnd = line.match(/^SECTION:([A-Z_]+):END$/);
-    if (sectionEnd) {
-      currentSection = undefined;
-      continue;
-    }
-
-    if (currentSection) {
-      sections.get(currentSection)?.push(line);
+  
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const sectionHeader = line.match(/^SECTION:([A-Z_]+):COUNT:(\d+)$/);
+    if (sectionHeader) {
+      const [, sectionName, countText] = sectionHeader;
+      const count = Number.parseInt(countText, 10);
+      const values: string[] = [];
+      for (let offset = 0; offset < count && index + 1 < lines.length; offset += 1) {
+        values.push(decodeProtocolLine(stripProtocolLinePrefix(lines[++index])));
+      }
+      sections.set(sectionName, values);
       continue;
     }
 
@@ -443,24 +454,18 @@ function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
 function parsePromptRequest(lines: string[]): InteractivePromptRequest {
   const metadata = new Map<string, string>();
   const sections = new Map<string, string[]>();
-  let currentSection: string | undefined;
-
-  for (const line of lines) {
-    const sectionStart = line.match(/^SECTION:([A-Z_]+):START$/);
-    if (sectionStart) {
-      currentSection = sectionStart[1];
-      sections.set(currentSection, []);
-      continue;
-    }
-
-    const sectionEnd = line.match(/^SECTION:([A-Z_]+):END$/);
-    if (sectionEnd) {
-      currentSection = undefined;
-      continue;
-    }
-
-    if (currentSection) {
-      sections.get(currentSection)?.push(line);
+  
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const sectionHeader = line.match(/^SECTION:([A-Z_]+):COUNT:(\d+)$/);
+    if (sectionHeader) {
+      const [, sectionName, countText] = sectionHeader;
+      const count = Number.parseInt(countText, 10);
+      const values: string[] = [];
+      for (let offset = 0; offset < count && index + 1 < lines.length; offset += 1) {
+        values.push(decodeProtocolLine(stripProtocolLinePrefix(lines[++index])));
+      }
+      sections.set(sectionName, values);
       continue;
     }
 
@@ -497,6 +502,27 @@ function parsePromptRequest(lines: string[]): InteractivePromptRequest {
 
 function sanitizePromptValue(value?: string): string {
   return (value ?? "").replace(/\r?\n/g, " ");
+}
+
+function toProtocolLines(value: string): string[] {
+  const normalized = value.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines;
+}
+
+function encodeProtocolLine(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function decodeProtocolLine(value: string): string {
+  return decodeURIComponent(value);
+}
+
+function stripProtocolLinePrefix(line: string): string {
+  return line.startsWith("LINE:") ? line.slice("LINE:".length) : "";
 }
 
 function escapeRString(value: string): string {
