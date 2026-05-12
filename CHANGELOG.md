@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7
+
+- start inline R sessions in the document workspace folder so `.Rprofile` can activate project tools such as `renv`
+- tighten the local `renv` smoke test so it depends on startup working directory instead of forcing `R_PROFILE_USER`
+
 ## 0.1.6
 
 - add configurable R startup arguments for inline chunk sessions and interactive R terminals

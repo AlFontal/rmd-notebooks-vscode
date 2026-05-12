@@ -47,8 +47,8 @@ writeLines("smoke_value <- function() 'renv smoke package loaded'", file.path(pa
 
 renv::install(package_root, prompt = FALSE)
 
-# Avoid leaking any parent renv activation state into the child R processes.
-Sys.unsetenv(c("RENV_PROJECT", "RENV_PROFILE", "RENV_ACTIVATE_PROJECT"))
+# Avoid leaking parent startup state into the child R processes.
+Sys.unsetenv(c("RENV_PROJECT", "RENV_PROFILE", "RENV_ACTIVATE_PROJECT", "R_PROFILE", "R_PROFILE_USER"))
 
 check_code <- paste(
   sprintf("package_name <- '%s'", package_name),
@@ -75,6 +75,7 @@ cases <- list(
     label = "inline default",
     config_args = c("--slave", "--vanilla"),
     process_args = c("--slave", "--vanilla"),
+    startup_directory = project_root,
     expect_renv = FALSE,
     expect_package = FALSE
   ),
@@ -82,6 +83,7 @@ cases <- list(
     label = "inline renv-compatible",
     config_args = c("--slave"),
     process_args = c("--slave"),
+    startup_directory = project_root,
     expect_renv = TRUE,
     expect_package = TRUE
   ),
@@ -89,6 +91,7 @@ cases <- list(
     label = "terminal default",
     config_args = c("--vanilla"),
     process_args = c("--vanilla"),
+    startup_directory = project_root,
     expect_renv = FALSE,
     expect_package = FALSE
   ),
@@ -96,6 +99,7 @@ cases <- list(
     label = "terminal empty args",
     config_args = character(),
     process_args = c("--no-save"),
+    startup_directory = project_root,
     expect_renv = TRUE,
     expect_package = TRUE,
     note = "non-interactive harness adds --no-save; a real VS Code terminal uses no args"
@@ -105,19 +109,32 @@ cases <- list(
 failures <- character()
 
 for (case in cases) {
+  previous_directory <- getwd()
+  setwd(case$startup_directory)
   output <- system2(
-    "R",
-    args = case$process_args,
+    "env",
+    args = c(
+      "-u",
+      "R_PROFILE",
+      "-u",
+      "R_PROFILE_USER",
+      "-u",
+      "R_ENVIRON",
+      "-u",
+      "R_ENVIRON_USER",
+      "R",
+      case$process_args
+    ),
     input = check_code,
     stdout = TRUE,
     stderr = TRUE,
     env = c(
       paste0("R_LIBS_USER=", child_user_library),
       "R_LIBS=",
-      "R_LIBS_SITE=",
-      paste0("R_PROFILE_USER=", file.path(project_root, ".Rprofile"))
+      "R_LIBS_SITE="
     )
   )
+  setwd(previous_directory)
   status <- attr(output, "status")
   if (is.null(status)) {
     status <- 0

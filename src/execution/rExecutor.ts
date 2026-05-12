@@ -45,12 +45,13 @@ export class RExecutor implements Executor {
   }
 
   public async warmupSession(documentUri: string): Promise<void> {
-    const session = this.getOrCreateSession(documentUri);
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(documentUri))?.uri.fsPath;
+    const session = this.getOrCreateSession(documentUri, workspaceFolder);
     await session.ready();
   }
 
   public async executeChunk(context: ExecutionContext): Promise<ExecutionResult> {
-    const session = this.getOrCreateSession(context.documentUri);
+    const session = this.getOrCreateSession(context.documentUri, context.workspaceFolder);
     const timeoutMs = vscode.workspace.getConfiguration("rmdNotebooks").get<number>("execution.interactiveFallbackTimeoutMs", 15000);
     let payload: RawExecutionPayload;
 
@@ -124,7 +125,7 @@ export class RExecutor implements Executor {
     await Promise.all([...this.sessions.keys()].map((uri) => this.disposeSession(uri)));
   }
 
-  private getOrCreateSession(documentUri: string): RSession {
+  private getOrCreateSession(documentUri: string, workspaceFolder?: string): RSession {
     const existing = this.sessions.get(documentUri);
     if (existing) {
       return existing;
@@ -134,7 +135,7 @@ export class RExecutor implements Executor {
     const rPath = configuration.get<string>("r.path", "R");
     const rArgs = getInlineRArgs(configuration);
     const sessionScriptPath = path.join(this.extensionUri.fsPath, "media", "r", "rmd_notebooks_session.R");
-    const created = new RSession(rPath, rArgs, sessionScriptPath);
+    const created = new RSession(rPath, rArgs, sessionScriptPath, workspaceFolder);
     this.sessions.set(documentUri, created);
     return created;
   }
@@ -162,9 +163,10 @@ class RSession {
   private sessionReady = false;
   private runtimeStderr = "";
 
-  public constructor(rPath: string, rArgs: string[], scriptPath: string) {
+  public constructor(rPath: string, rArgs: string[], scriptPath: string, startupDirectory?: string) {
     this.process = spawn(rPath, rArgs, {
-      stdio: "pipe"
+      stdio: "pipe",
+      cwd: startupDirectory
     });
 
     this.lineReader = readline.createInterface({
