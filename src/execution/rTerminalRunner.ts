@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { getTerminalRArgs } from "./rStartupArgs";
 
 export class RTerminalRunner implements vscode.Disposable {
   private terminal: vscode.Terminal | undefined;
@@ -36,11 +37,12 @@ export class RTerminalRunner implements vscode.Disposable {
 
     const configuration = vscode.workspace.getConfiguration("rmdNotebooks");
     const rPath = configuration.get<string>("r.path", "R");
+    const rArgs = getTerminalRArgs(configuration);
 
     this.terminal = vscode.window.createTerminal({
       name: "Rmd Notebooks R",
       shellPath: rPath,
-      shellArgs: ["--vanilla"],
+      shellArgs: rArgs,
       cwd: workspaceFolder
     });
 

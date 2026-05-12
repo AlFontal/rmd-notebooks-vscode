@@ -70,6 +70,21 @@ The notebook toolbar also exposes `Restart R Session` and `View Source`.
 
 Common prompt-style interactions such as `menu()` and `readline()` are handled inline with VS Code pickers and input boxes. If execution still appears to stall because a chunk wants unsupported interactive input, the extension can prompt to run that chunk in an integrated R terminal instead. This is controlled by `rmdNotebooks.execution.interactiveFallbackBehavior` and `rmdNotebooks.execution.interactiveFallbackTimeoutMs`.
 
+## Settings
+
+- `rmdNotebooks.r.path`: path to the R executable.
+- `rmdNotebooks.r.args`: arguments for inline chunk-execution R sessions. Defaults to `["--slave", "--vanilla"]`.
+- `rmdNotebooks.r.terminalArgs`: arguments for the interactive R terminal. Defaults to `["--vanilla"]`.
+
+For projects that rely on startup files, such as `renv` projects that auto-activate from `.Rprofile`, remove `--vanilla` from the relevant setting. For example:
+
+```json
+{
+  "rmdNotebooks.r.args": ["--slave"],
+  "rmdNotebooks.r.terminalArgs": []
+}
+```
+
 ## Development
 
 ```bash
@@ -79,6 +94,14 @@ npm test
 ```
 
 `npm test` is the full local verification path, including the real VS Code extension-host suite. GitHub Actions stays lighter and only runs the unit tests plus packaging checks.
+
+For changes that affect R startup behavior, run the local `renv` smoke test:
+
+```bash
+npm run smoke:renv
+```
+
+This creates a temporary `renv` project and verifies that the default `--vanilla` startup flags skip project activation while `renv`-compatible args allow the project library to load. The command may install `renv` into a temporary bootstrap library if it is not already available.
 
 On macOS, the VS Code extension-host portion of `npm test` may abort if it is launched from a restrictive sandbox. If that happens, rerun `npm run test:vscode` from a normal local shell/session outside the sandbox.
 
