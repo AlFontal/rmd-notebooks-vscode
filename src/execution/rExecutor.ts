@@ -12,6 +12,7 @@ import {
   InteractivePromptResponse
 } from "./executorTypes";
 import { InteractiveExecutionError } from "./executionErrors";
+import { getInlineRArgs } from "./rStartupArgs";
 
 const READY_MARKER = "RMD_NOTEBOOKS_READY";
 const RESULT_START_MARKER = "RMD_NOTEBOOKS_RESULT_START";
@@ -131,8 +132,9 @@ export class RExecutor implements Executor {
 
     const configuration = vscode.workspace.getConfiguration("rmdNotebooks");
     const rPath = configuration.get<string>("r.path", "R");
+    const rArgs = getInlineRArgs(configuration);
     const sessionScriptPath = path.join(this.extensionUri.fsPath, "media", "r", "rmd_notebooks_session.R");
-    const created = new RSession(rPath, sessionScriptPath);
+    const created = new RSession(rPath, rArgs, sessionScriptPath);
     this.sessions.set(documentUri, created);
     return created;
   }
@@ -160,8 +162,8 @@ class RSession {
   private sessionReady = false;
   private runtimeStderr = "";
 
-  public constructor(rPath: string, scriptPath: string) {
-    this.process = spawn(rPath, ["--slave", "--vanilla"], {
+  public constructor(rPath: string, rArgs: string[], scriptPath: string) {
+    this.process = spawn(rPath, rArgs, {
       stdio: "pipe"
     });
 

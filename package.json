@@ -2,7 +2,7 @@
   "name": "rmd-notebooks-vscode",
   "displayName": "Rmd Notebooks for VS Code",
   "description": "Open .Rmd and .qmd files as runnable R notebooks in VS Code and Positron.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "AlFontal",
   "author": "Alejandro Fontal",
   "license": "MIT",
@@ -120,6 +120,27 @@
           "default": "R",
           "description": "Path to the R executable used for chunk execution."
         },
+        "rmdNotebooks.r.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "--slave",
+            "--vanilla"
+          ],
+          "description": "Arguments passed to the R executable when starting an inline chunk-execution session."
+        },
+        "rmdNotebooks.r.terminalArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "--vanilla"
+          ],
+          "description": "Arguments passed to the R executable when starting the interactive R terminal."
+        },
         "rmdNotebooks.execution.interactiveFallbackTimeoutMs": {
           "type": "number",
           "default": 15000,
@@ -188,7 +209,8 @@
     "publish:precheck": "npm run test && npm run package:vsix",
     "test:unit": "npm run compile && mocha \"out/src/test/**/*.test.js\"",
     "test:vscode": "npm run compile && node ./out/test/vscode/runVscodeTests.js",
-    "test": "npm run test:unit && npm run test:vscode"
+    "test": "npm run test:unit && npm run test:vscode",
+    "smoke:renv": "Rscript --vanilla scripts/smoke_renv_startup.R"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.6.0",

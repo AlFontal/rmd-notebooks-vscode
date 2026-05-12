@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6
+
+- add configurable R startup arguments for inline chunk sessions and interactive R terminals
+- keep existing startup defaults while allowing `renv` projects to remove `--vanilla`
+- add a local `renv` startup smoke test via `npm run smoke:renv`
+
 ## 0.1.5
 
 - stop `Run All Chunks` after terminal redirection so later cells do not continue in a mismatched inline session
