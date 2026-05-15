@@ -12,10 +12,6 @@ export interface InlineChunksCodeCellMetadata {
   options?: ChunkOptions;
   fenceLength: number;
   isClosed: boolean;
-  chunkId?: string;
-  contentHash?: string;
-  headerHash?: string;
-  bodyHash?: string;
 }
 
 export interface InlineChunksMarkupCellMetadata {

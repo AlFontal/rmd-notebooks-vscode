@@ -86,6 +86,10 @@ function buildHeader(languageId: string, metadata: ReturnType<typeof getInlineCh
       return metadata.header;
     }
 
+    if (metadata.headerInfo && metadata.headerInfo.trim().length > 0) {
+      return `\`\`\`{${metadata.headerInfo}}`;
+    }
+
     return metadata.label ? `\`\`\`{${languageId} ${metadata.label}}` : `\`\`\`{${languageId}}`;
   }
 
