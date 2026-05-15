@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { assignChunkIdentities } from "../document/chunkIdentity";
+import { assignChunkIdentities, createIdentitySeed } from "../document/chunkIdentity";
 import { ChunkIdentitySeed, ChunkOutputRecord, ExecutableChunk, OutputItem, ParsedExecutableChunk } from "../document/chunkTypes";
 import { OutputChannelController } from "../editor/outputChannelController";
 import { ExecutorRegistry } from "../execution/executorRegistry";
@@ -163,6 +163,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         execution.end(undefined, Date.now());
       }
     });
+  }
+
+  public getChunkIdForCell(documentUri: string, cellIndex: number): string | undefined {
+    const snapshot = this.snapshots.get(documentUri);
+    return snapshot?.chunks.find((entry) => entry.index === cellIndex)?.chunk.identity.chunkId;
   }
 
   public async getDocumentState(documentUri: string): Promise<{
@@ -487,13 +492,14 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
   private async refreshNotebook(notebook: vscode.NotebookDocument): Promise<NotebookSnapshot> {
     const outputs = await this.ensureOutputsLoaded(notebook.uri.toString());
-    let snapshot = buildNotebookSnapshot(notebook, outputs);
+    const previousSnapshot = this.snapshots.get(notebook.uri.toString());
+    let snapshot = buildNotebookSnapshot(notebook, outputs, previousSnapshot);
     this.snapshots.set(notebook.uri.toString(), snapshot);
     reconcileOutputs(snapshot, outputs);
     await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
     const metadataChanged = await this.applyChunkMetadata(notebook, snapshot);
     if (metadataChanged) {
-      snapshot = buildNotebookSnapshot(notebook, outputs);
+      snapshot = buildNotebookSnapshot(notebook, outputs, snapshot);
       this.snapshots.set(notebook.uri.toString(), snapshot);
       reconcileOutputs(snapshot, outputs);
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
@@ -506,7 +512,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     for (const entry of snapshot.chunks) {
       const existing = getInlineChunksMetadata(entry.cell.metadata);
-      const nextMetadata = withInlineChunksMetadata(entry.cell.metadata, {
+
+      const targetSource: InlineChunksCodeCellMetadata = {
         kind: "code",
         header: existing?.kind === "code" ? existing.header : entry.chunk.header,
         headerInfo: existing?.kind === "code" ? existing.headerInfo : entry.chunk.headerInfo,
@@ -514,16 +521,15 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         label: entry.chunk.label,
         options: existing?.kind === "code" ? existing.options : parseChunkOptions(entry.chunk.headerInfo),
         fenceLength: existing?.kind === "code" ? existing.fenceLength : entry.chunk.fenceLength,
-        isClosed: true,
-        chunkId: entry.chunk.identity.chunkId,
-        contentHash: entry.chunk.identity.contentHash,
-        headerHash: entry.chunk.identity.headerHash,
-        bodyHash: entry.chunk.identity.bodyHash
-      } satisfies InlineChunksCodeCellMetadata);
+        isClosed: existing?.kind === "code" ? existing.isClosed : entry.chunk.isClosed
+      };
 
-      if (JSON.stringify(entry.cell.metadata) !== JSON.stringify(nextMetadata)) {
-        edits.push(vscode.NotebookEdit.updateCellMetadata(entry.index, nextMetadata));
+      if (existing && JSON.stringify(existing) === JSON.stringify(targetSource)) {
+        continue;
       }
+
+      const next = withInlineChunksMetadata(entry.cell.metadata, targetSource);
+      edits.push(vscode.NotebookEdit.updateCellMetadata(entry.index, next));
     }
 
     if (edits.length === 0) {
@@ -750,7 +756,11 @@ function buildPromptQuickPickItems(
 }
 
 
-function buildNotebookSnapshot(notebook: vscode.NotebookDocument, outputs: Map<string, ChunkOutputRecord>): NotebookSnapshot {
+function buildNotebookSnapshot(
+  notebook: vscode.NotebookDocument,
+  outputs: Map<string, ChunkOutputRecord>,
+  previousSnapshot?: NotebookSnapshot
+): NotebookSnapshot {
   const codeCells = notebook
     .getCells()
     .filter((cell) => cell.kind === vscode.NotebookCellKind.Code)
@@ -760,9 +770,9 @@ function buildNotebookSnapshot(notebook: vscode.NotebookDocument, outputs: Map<s
       parsed: toParsedChunk(notebook, cell)
     }));
 
-  const metadataSeeds = codeCells
-    .map(({ cell }) => toIdentitySeed(cell))
-    .filter((seed): seed is ChunkIdentitySeed => seed !== undefined);
+  const metadataSeeds = previousSnapshot
+    ? previousSnapshot.chunks.map((entry) => createIdentitySeed(entry.chunk))
+    : [];
 
   const outputSeeds = [...outputs.values()]
     .filter((record) => !metadataSeeds.some((seed) => seed.chunkId === record.chunkId))
@@ -833,24 +843,6 @@ function toParsedChunk(notebook: vscode.NotebookDocument, cell: vscode.NotebookC
       endLine,
       endCharacter: 3
     }
-  };
-}
-
-function toIdentitySeed(cell: vscode.NotebookCell): ChunkIdentitySeed | undefined {
-  const metadata = getInlineChunksMetadata(cell.metadata);
-  if (metadata?.kind !== "code" || !metadata.chunkId || !metadata.contentHash || !metadata.headerHash || !metadata.bodyHash) {
-    return undefined;
-  }
-
-  return {
-    chunkId: metadata.chunkId,
-    contentHash: metadata.contentHash,
-    headerHash: metadata.headerHash,
-    bodyHash: metadata.bodyHash,
-    language: metadata.language,
-    label: metadata.label,
-    startLine: cell.index * 2,
-    header: metadata.header
   };
 }
 

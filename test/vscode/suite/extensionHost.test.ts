@@ -235,6 +235,84 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(savedSource.includes("```{r renamed, echo=FALSE, warning=FALSE}"));
   });
 
+  it("preserves chunk header options when saving after a body edit", async () => {
+    await writeFixture(
+      "preserve-options.qmd",
+      [
+        "# Preserve options",
+        "",
+        "```{r eval=FALSE}",
+        "print(\"should stay non-executable\")",
+        "```",
+        "",
+        "```{r labeled, echo=FALSE, warning=FALSE}",
+        "x <- 1",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("preserve-options.qmd");
+    const firstCodeCellIndex = findFirstCodeCellIndex(editor.notebook);
+    const firstCell = editor.notebook.cellAt(firstCodeCellIndex);
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      firstCell.document.uri,
+      new vscode.Range(new vscode.Position(0, 0), firstCell.document.lineAt(0).range.end),
+      "print(\"edited body\")"
+    );
+    await vscode.workspace.applyEdit(edit);
+
+    await waitFor(() => (firstCell.document.getText().includes("edited body") ? true : undefined));
+
+    const saved = await editor.notebook.save();
+    assert.ok(saved, "Notebook save should succeed.");
+
+    const savedBytes = await vscode.workspace.fs.readFile(editor.notebook.uri);
+    const savedSource = Buffer.from(savedBytes).toString("utf8");
+
+    assert.ok(
+      savedSource.includes("```{r eval=FALSE}"),
+      `Expected unlabeled header to retain eval=FALSE; got:\n${savedSource}`
+    );
+    assert.ok(
+      savedSource.includes("```{r labeled, echo=FALSE, warning=FALSE}"),
+      `Expected labeled header to retain its options; got:\n${savedSource}`
+    );
+  });
+
+  it("does not mark the notebook dirty after opening an unedited file", async () => {
+    await writeFixture(
+      "clean-open.qmd",
+      [
+        "# Clean open",
+        "",
+        "```{r setup, include=FALSE}",
+        "x <- 1",
+        "```",
+        "",
+        "```{r labeled, echo=FALSE, warning=FALSE}",
+        "y <- 2",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("clean-open.qmd");
+
+    await waitForDocumentState(
+      editor.notebook.uri,
+      (state) => (state.snapshot?.chunkIds.length ?? 0) >= 2
+    );
+
+    assert.equal(
+      editor.notebook.isDirty,
+      false,
+      "Opening an unedited notebook should not mark it dirty."
+    );
+  });
+
   it("skips execution for eval=FALSE", async () => {
     await writeFixture(
       "eval-false.qmd",

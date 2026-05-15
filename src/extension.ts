@@ -49,18 +49,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
   const rExecutor = new RExecutor(context.extensionUri);
   const terminalRunner = new RTerminalRunner();
   executorRegistry.register(rExecutor);
-  const cellStatusBarProvider = new InlineChunksCellStatusBarProvider();
 
   const notebookRuntime = new InlineChunksNotebookRuntime(outputStore, executorRegistry, outputChannelController, terminalRunner);
+  const cellStatusBarProvider = new InlineChunksCellStatusBarProvider(notebookRuntime);
 
   context.subscriptions.push(
     outputChannelController,
     terminalRunner,
     vscode.workspace.registerNotebookSerializer(INLINE_CHUNKS_NOTEBOOK_TYPE, new InlineChunksNotebookSerializer(), {
-      transientOutputs: true,
-      transientCellMetadata: {
-        rmdNotebooks: true
-      }
+      transientOutputs: true
     }),
     vscode.notebooks.registerNotebookCellStatusBarItemProvider(INLINE_CHUNKS_NOTEBOOK_TYPE, cellStatusBarProvider),
     notebookRuntime,
