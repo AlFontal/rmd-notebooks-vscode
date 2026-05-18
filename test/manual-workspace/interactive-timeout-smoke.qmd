@@ -1,0 +1,173 @@
+# Interactive Timeout Smoke Test
+
+Use this file manually with the Rmd Notebooks extension. Run chunks one at a time unless a section says otherwise.
+
+Suggested settings passes:
+
+1. Default behavior:
+
+```json
+{
+  "rmdNotebooks.execution.interactiveFallbackTimeoutMs": 0,
+  "rmdNotebooks.execution.interactiveFallbackBehavior": "prompt"
+}
+```
+
+2. Opt-in timeout fallback:
+
+```json
+{
+  "rmdNotebooks.execution.interactiveFallbackTimeoutMs": 3000,
+  "rmdNotebooks.execution.interactiveFallbackBehavior": "prompt"
+}
+```
+
+## Baseline State
+
+```{r baseline-state}
+smoke_state <- list()
+smoke_state$baseline <- TRUE
+x <- 42
+cat("baseline ok; x=", x, "\n", sep = "")
+```
+
+## Legitimate Slow Chunk
+
+With timeout disabled, this should finish after 5 seconds and keep the same R session.
+
+With a 3 second timeout enabled, this should produce the interactive fallback warning, but the session should not be killed.
+
+```{r legitimate-slow}
+smoke_state$slow_started <- TRUE
+Sys.sleep(5)
+smoke_state$slow_finished <- TRUE
+cat("slow chunk finished; x=", x, "\n", sep = "")
+```
+
+```{r check-after-slow}
+cat("x still exists: ", exists("x"), "\n", sep = "")
+cat("x=", x, "\n", sep = "")
+cat("slow_started=", isTRUE(smoke_state$slow_started), "\n", sep = "")
+cat("slow_finished=", isTRUE(smoke_state$slow_finished), "\n", sep = "")
+```
+
+## Supported Input Prompt
+
+This should show a VS Code input box. Type any value.
+
+```{r readline-supported}
+name <- readline("Package or project name? ")
+smoke_state$readline_value <- name
+cat("readline value=", name, "\n", sep = "")
+```
+
+## Supported Menu Prompt
+
+This should show a VS Code quick pick.
+
+```{r menu-supported}
+choice <- menu(c("alpha", "beta", "gamma"), title = "Pick a smoke option")
+smoke_state$menu_choice <- choice
+cat("menu choice=", choice, "\n", sep = "")
+```
+
+## Supported Yes/No Prompt
+
+This should show a VS Code quick pick with Yes and No.
+
+```{r ask-yes-no-supported}
+answer <- askYesNo("Keep testing inline prompts?", default = TRUE)
+smoke_state$ask_yes_no <- answer
+cat("askYesNo answer=", answer, "\n", sep = "")
+```
+
+## Prompt Cancellation
+
+Run these and press Escape or cancel the VS Code UI.
+
+Expected:
+
+- `readline()` returns an empty string.
+- `menu()` returns `0`.
+- `askYesNo(..., default = NA)` returns `NA`.
+
+```{r prompt-cancel-readline}
+cancelled_input <- readline("Cancel this input with Escape")
+cat("cancelled readline value length=", nchar(cancelled_input), "\n", sep = "")
+```
+
+```{r prompt-cancel-menu}
+cancelled_menu <- menu(c("one", "two"), title = "Cancel this menu")
+cat("cancelled menu value=", cancelled_menu, "\n", sep = "")
+```
+
+```{r prompt-cancel-askyesno}
+cancelled_confirm <- askYesNo("Cancel this confirmation", default = NA)
+cat("cancelled askYesNo is NA: ", is.na(cancelled_confirm), "\n", sep = "")
+```
+
+## Ordinary R Error
+
+This should fail the cell but keep the R session alive.
+
+```{r ordinary-error}
+smoke_state$error_started <- TRUE
+stop("intentional smoke-test error")
+```
+
+```{r check-after-error}
+cat("session survived ordinary error: ", exists("x") && identical(x, 42), "\n", sep = "")
+cat("error_started=", isTRUE(smoke_state$error_started), "\n", sep = "")
+```
+
+## Stop Button / SIGINT
+
+Start this chunk, then click the notebook Stop button before it completes.
+
+After it stops, run the next chunk. Expected: the session is still alive, `interrupt_started` is `TRUE`, and `interrupt_finished` is absent or `FALSE`.
+
+```{r interrupt-with-stop}
+smoke_state$interrupt_started <- TRUE
+for (i in seq_len(60)) {
+  cat("tick ", i, "\n", sep = "")
+  flush.console()
+  Sys.sleep(1)
+}
+smoke_state$interrupt_finished <- TRUE
+cat("interrupt chunk finished without stop\n")
+```
+
+```{r check-after-stop}
+cat("session survived stop: ", exists("x") && identical(x, 42), "\n", sep = "")
+cat("interrupt_started=", isTRUE(smoke_state$interrupt_started), "\n", sep = "")
+cat("interrupt_finished=", isTRUE(smoke_state$interrupt_finished), "\n", sep = "")
+```
+
+## Unsupported Raw Stdin
+
+This is the intentionally awkward case.
+
+With timeout disabled, it may block until you click Stop.
+
+With `interactiveFallbackTimeoutMs` set to `3000`, it should trigger fallback after about 3 seconds. If the behavior is `prompt`, choose whether to send it to the R terminal. The inline R session should still survive either way.
+
+```{r unsupported-scan}
+smoke_state$scan_started <- TRUE
+cat("scan() is about to read from raw stdin\n")
+value <- scan(file = "", what = character(), nmax = 1, quiet = TRUE)
+smoke_state$scan_value <- value
+cat("scan value=", paste(value, collapse = ","), "\n", sep = "")
+```
+
+```{r check-after-scan}
+cat("session survived scan path: ", exists("x") && identical(x, 42), "\n", sep = "")
+cat("scan_started=", isTRUE(smoke_state$scan_started), "\n", sep = "")
+cat("scan_value exists=", exists("smoke_state") && !is.null(smoke_state$scan_value), "\n", sep = "")
+```
+
+## Final State Summary
+
+```{r final-summary}
+cat("x=", x, "\n", sep = "")
+str(smoke_state)
+```

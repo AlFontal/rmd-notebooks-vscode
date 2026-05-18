@@ -382,7 +382,9 @@ describe("Rmd Notebooks Notebook Host", () => {
     const targetCell = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
     const edit = new vscode.WorkspaceEdit();
     edit.replace(targetCell.document.uri, new vscode.Range(new vscode.Position(1, 0), new vscode.Position(1, 5)), "x + 3");
-    await vscode.workspace.applyEdit(edit);
+    const edited = await vscode.workspace.applyEdit(edit);
+    assert.ok(edited, "Cell body edit should be applied.");
+    await waitFor(() => (targetCell.document.getText().includes("x + 3") ? true : undefined));
 
     const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
       candidate.outputs.some((record) => record.stale)
@@ -481,6 +483,49 @@ describe("Rmd Notebooks Notebook Host", () => {
     );
 
     assert.ok(state.outputs.some((record) => record.outputTypes.includes("text")));
+  });
+
+  it("keeps the inline R session alive after an execution timeout", async () => {
+    await writeFixture(
+      "timeout-preserves-session.qmd",
+      [
+        "# Timeout preserves session",
+        "",
+        "```{r waiting}",
+        "x <- 42",
+        "Sys.sleep(2)",
+        "```",
+        "",
+        "```{r check}",
+        "cat(sprintf('x=%s\\n', x))",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    await updateTestSetting("execution.interactiveFallbackTimeoutMs", 1000);
+    await updateTestSetting("execution.interactiveFallbackBehavior", "error");
+
+    const editor = await openNotebookEditor("timeout-preserves-session.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "error")
+    );
+
+    await sleep(1000);
+
+    editor.selection = singleCellRange(findLastCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success" && record.outputTypes.includes("text"))
+    );
+
+    assert.ok(state.outputChannelText.includes("x=42"));
+    assert.equal(vscode.window.terminals.length, 0);
   });
 
   it("stops run-all after redirecting an interactive chunk to the R terminal", async () => {
@@ -657,7 +702,7 @@ async function writeFixture(name: string, contents: string): Promise<void> {
 }
 
 async function resetTestSettings(): Promise<void> {
-  await updateTestSetting("execution.interactiveFallbackTimeoutMs", 15000);
+  await updateTestSetting("execution.interactiveFallbackTimeoutMs", 0);
   await updateTestSetting("execution.interactiveFallbackBehavior", "prompt");
 }
 
@@ -738,4 +783,8 @@ async function waitFor<T>(producer: () => Promise<T | undefined> | T | undefined
   }
 
   throw new Error(`Timed out after ${timeoutMs}ms.`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

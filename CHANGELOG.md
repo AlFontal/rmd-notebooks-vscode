@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- preserve chunk header options such as `eval=FALSE`, `fig.width`, `echo=FALSE`, and `warning=FALSE` when saving after body edits
+- keep notebooks clean on open by storing chunk identity in the runtime snapshot instead of writing it back to cell metadata
+- disable the inline interactive fallback timeout by default so legitimate slow chunks keep running
+- keep the inline R session alive when an opt-in timeout fires, while still allowing terminal fallback
+- wire the notebook Stop button to interrupt the active R execution without restarting the session
+- catch R interrupts in the inline session shim so interrupted chunks return a normal failed result and the session can continue
+
 ## 0.1.7
 
 - start inline R sessions in the document workspace folder so `.Rprofile` can activate project tools such as `renv`
