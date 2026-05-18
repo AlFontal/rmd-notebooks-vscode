@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - preserve chunk header options such as `eval=FALSE`, `fig.width`, `echo=FALSE`, and `warning=FALSE` when saving after body edits
 - keep notebooks clean on open by storing chunk identity in the runtime snapshot instead of writing it back to cell metadata
