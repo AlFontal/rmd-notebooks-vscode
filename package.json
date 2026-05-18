@@ -143,9 +143,9 @@
         },
         "rmdNotebooks.execution.interactiveFallbackTimeoutMs": {
           "type": "number",
-          "default": 15000,
-          "minimum": 1000,
-          "description": "How long inline execution can wait before assuming the chunk needs interactive terminal input."
+          "default": 0,
+          "minimum": 0,
+          "description": "How long inline execution can wait before assuming the chunk needs interactive terminal input. Set to 0 to disable the timeout."
         },
         "rmdNotebooks.execution.interactiveFallbackBehavior": {
           "type": "string",

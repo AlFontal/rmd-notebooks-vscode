@@ -52,7 +52,7 @@ Current limits:
 - static image plots only
 - no htmlwidgets
 - only a small subset of knitr options is enforced today: `eval=FALSE`, `include=FALSE`, `results='hide'`
-- unsupported interactive flows still fall back to an R terminal after timeout
+- unsupported interactive flows can fall back to an R terminal if you enable the timeout
 
 ## Commands
 
@@ -68,13 +68,15 @@ Current limits:
 
 The notebook toolbar also exposes `Restart R Session` and `View Source`.
 
-Common prompt-style interactions such as `menu()` and `readline()` are handled inline with VS Code pickers and input boxes. If execution still appears to stall because a chunk wants unsupported interactive input, the extension can prompt to run that chunk in an integrated R terminal instead. This is controlled by `rmdNotebooks.execution.interactiveFallbackBehavior` and `rmdNotebooks.execution.interactiveFallbackTimeoutMs`.
+Common prompt-style interactions such as `menu()` and `readline()` are handled inline with VS Code pickers and input boxes. The notebook Stop button interrupts the current inline R execution without restarting the session. If execution still appears to stall because a chunk wants unsupported interactive input, you can enable a timeout that prompts to run that chunk in an integrated R terminal instead. This is controlled by `rmdNotebooks.execution.interactiveFallbackBehavior` and `rmdNotebooks.execution.interactiveFallbackTimeoutMs`; the timeout is disabled by default with a value of `0`.
 
 ## Settings
 
 - `rmdNotebooks.r.path`: path to the R executable.
 - `rmdNotebooks.r.args`: arguments for inline chunk-execution R sessions. Defaults to `["--slave", "--vanilla"]`.
 - `rmdNotebooks.r.terminalArgs`: arguments for the interactive R terminal. Defaults to `["--vanilla"]`.
+- `rmdNotebooks.execution.interactiveFallbackTimeoutMs`: optional timeout for treating a stalled inline chunk as unsupported interactive input. Defaults to `0`, which disables the timeout.
+- `rmdNotebooks.execution.interactiveFallbackBehavior`: what to do when the optional interactive fallback timeout fires. Defaults to `prompt`.
 
 For projects that rely on startup files, such as `renv` projects that auto-activate from `.Rprofile`, remove `--vanilla` from the relevant setting. For example:
 

@@ -264,6 +264,9 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
   }, error = function(error_condition) {
     success <<- FALSE
     message(conditionMessage(error_condition))
+  }, interrupt = function(interrupt_condition) {
+    success <<- FALSE
+    message("Execution interrupted.")
   })
 
   grDevices::dev.off()

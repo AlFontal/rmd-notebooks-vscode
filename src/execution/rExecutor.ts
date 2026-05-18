@@ -34,6 +34,12 @@ interface RawExecutionPayload {
   plots: string[];
 }
 
+interface PendingExecution {
+  resolve: (payload: RawExecutionPayload) => void;
+  reject: (error: Error) => void;
+  abandoned: boolean;
+}
+
 export class RExecutor implements Executor {
   public readonly language = "r";
   private readonly sessions = new Map<string, RSession>();
@@ -52,25 +58,15 @@ export class RExecutor implements Executor {
 
   public async executeChunk(context: ExecutionContext): Promise<ExecutionResult> {
     const session = this.getOrCreateSession(context.documentUri, context.workspaceFolder);
-    const timeoutMs = vscode.workspace.getConfiguration("rmdNotebooks").get<number>("execution.interactiveFallbackTimeoutMs", 15000);
-    let payload: RawExecutionPayload;
-
-    try {
-      payload = await session.execute(
-        context.code,
-        context.workspaceFolder,
-        context.artifactDirectory,
-        context.plot,
-        timeoutMs,
-        context.prompt
-      );
-    } catch (error) {
-      if (error instanceof InteractiveExecutionError) {
-        this.sessions.delete(context.documentUri);
-        await session.dispose();
-      }
-      throw error;
-    }
+    const timeoutMs = vscode.workspace.getConfiguration("rmdNotebooks").get<number>("execution.interactiveFallbackTimeoutMs", 0);
+    const payload = await session.execute(
+      context.code,
+      context.workspaceFolder,
+      context.artifactDirectory,
+      context.plot,
+      timeoutMs,
+      context.prompt
+    );
 
     const items: OutputItem[] = [];
 
@@ -121,6 +117,11 @@ export class RExecutor implements Executor {
     await session.dispose();
   }
 
+  public async interruptSession(documentUri: string): Promise<void> {
+    const session = this.sessions.get(documentUri);
+    await session?.interrupt();
+  }
+
   public async disposeAll(): Promise<void> {
     await Promise.all([...this.sessions.keys()].map((uri) => this.disposeSession(uri)));
   }
@@ -147,10 +148,7 @@ class RSession {
   private readonly readyPromise: Promise<void>;
   private readyResolve!: () => void;
   private readyReject!: (error: Error) => void;
-  private pending: {
-    resolve: (payload: RawExecutionPayload) => void;
-    reject: (error: Error) => void;
-  } | undefined;
+  private pending: PendingExecution | undefined;
   private currentLines: string[] = [];
   private currentPromptLines: string[] = [];
   private waitingForResult = false;
@@ -241,7 +239,19 @@ class RSession {
     }
 
     return new Promise<RawExecutionPayload>((resolve, reject) => {
-      this.pending = { resolve, reject };
+      this.pending = {
+        abandoned: false,
+        resolve: (payload) => {
+          this.clearExecutionTimeout();
+          this.promptHandler = undefined;
+          resolve(payload);
+        },
+        reject: (error) => {
+          this.clearExecutionTimeout();
+          this.promptHandler = undefined;
+          reject(error);
+        }
+      };
       this.promptHandler = promptHandler;
       this.executionTimeoutMs = timeoutMs;
       this.runtimeStderr = "";
@@ -258,22 +268,15 @@ class RSession {
         this.process.stdin.write(`LINE:${encodeProtocolLine(line)}\n`);
       }
       this.process.stdin.write(`${COMMAND_END_MARKER}\n`);
-
-      const originalResolve = resolve;
-      const originalReject = reject;
-      this.pending = {
-        resolve: (payload) => {
-          this.clearExecutionTimeout();
-          this.promptHandler = undefined;
-          originalResolve(payload);
-        },
-        reject: (error) => {
-          this.clearExecutionTimeout();
-          this.promptHandler = undefined;
-          originalReject(error);
-        }
-      };
     });
+  }
+
+  public async interrupt(): Promise<void> {
+    if (!this.pending || this.pending.abandoned) {
+      return;
+    }
+
+    this.interruptProcess();
   }
 
   public async dispose(): Promise<void> {
@@ -315,18 +318,19 @@ class RSession {
       this.waitingForResult = false;
       const pending = this.pending;
       this.pending = undefined;
-      if (!pending) {
-        return;
-      }
 
       try {
+        if (!pending || pending.abandoned) {
+          return;
+        }
+
         const payload = parseRawExecutionPayload(this.currentLines);
         if (this.runtimeStderr.trim().length > 0) {
           payload.stderr = payload.stderr.length > 0 ? `${payload.stderr}\n${this.runtimeStderr.trimEnd()}` : this.runtimeStderr.trimEnd();
         }
         pending.resolve(payload);
       } catch (error) {
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
+        pending?.reject(error instanceof Error ? error : new Error(String(error)));
       } finally {
         this.currentLines = [];
         this.runtimeStderr = "";
@@ -353,20 +357,19 @@ class RSession {
 
     this.executionTimeout = setTimeout(() => {
       const pending = this.pending;
-      if (!pending) {
+      if (!pending || pending.abandoned) {
         return;
       }
 
-      const hadPromptOpen = this.waitingForPrompt;
-      this.pending = undefined;
-      this.promptHandler = undefined;
-      this.waitingForResult = false;
-      this.waitingForPrompt = false;
-      this.currentLines = [];
-      this.currentPromptLines = [];
-      if (hadPromptOpen) {
-        this.writePromptResponse({ cancelled: true });
+      try {
+        this.interruptProcess();
+      } catch (error) {
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+        return;
       }
+
+      pending.abandoned = true;
+      this.promptHandler = undefined;
       pending.reject(
         new InteractiveExecutionError(
           `Inline execution timed out after ${this.executionTimeoutMs}ms and may need interactive input.`
@@ -379,6 +382,16 @@ class RSession {
     if (this.executionTimeout) {
       clearTimeout(this.executionTimeout);
       this.executionTimeout = undefined;
+    }
+  }
+
+  private interruptProcess(): void {
+    if (this.process.killed) {
+      return;
+    }
+
+    if (!this.process.kill("SIGINT")) {
+      throw new Error("Unable to interrupt R session.");
     }
   }
 
