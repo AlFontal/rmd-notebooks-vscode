@@ -1,10 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { runTests } from "@vscode/test-electron";
+import { runTests, runVSCodeCommand } from "@vscode/test-electron";
 
 async function main(): Promise<void> {
   const extensionDevelopmentPath = path.resolve(__dirname, "../../..");
+  await installLocalExtensionDependencies(extensionDevelopmentPath, ["REditorSupport.r"]);
   const extensionTestsPath = path.resolve(__dirname, "./suite/index");
   const workspacePath = await createWorkspaceFixture();
   const resultFilePath = path.resolve(__dirname, ".vscode-test-result.json");
@@ -24,6 +25,9 @@ async function main(): Promise<void> {
         "--skip-release-notes",
         "--disable-updates"
       ],
+      extensionTestsEnv: {
+        ELECTRON_RUN_AS_NODE: undefined
+      },
       reuseMachineInstall: false
     });
     await assertSuccessfulTestResult(resultFilePath, proofFilePath);
@@ -31,6 +35,25 @@ async function main(): Promise<void> {
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
     await fs.rm(resultFilePath, { force: true });
+  }
+}
+
+async function installLocalExtensionDependencies(extensionDevelopmentPath: string, extensionIds: string[]): Promise<void> {
+  const extensionsDirectory = path.join(extensionDevelopmentPath, ".vscode-test", "extensions");
+  await fs.mkdir(extensionsDirectory, { recursive: true });
+  await fs.rm(path.join(extensionsDirectory, ".obsolete"), { force: true });
+
+  for (const extensionId of extensionIds) {
+    await runVSCodeCommand(["--install-extension", extensionId, "--force"], {
+      version: "1.112.0",
+      reuseMachineInstall: false,
+      spawn: {
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: undefined
+        }
+      }
+    });
   }
 }
 

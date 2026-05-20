@@ -11,7 +11,7 @@ describe("rStartupArgs", () => {
   it("defaults inline R args to the current inline behavior", () => {
     const configuration = testConfiguration({});
 
-    assert.deepEqual(getInlineRArgs(configuration), ["--slave", "--vanilla"]);
+    assert.deepEqual(getInlineRArgs(configuration), ["--slave"]);
   });
 
   it("defaults terminal R args to the current terminal behavior", () => {
@@ -64,6 +64,7 @@ describe("rStartupArgs", () => {
 
     assert.deepEqual(properties["rmdNotebooks.r.args"].default, [...DEFAULT_INLINE_R_ARGS]);
     assert.deepEqual(properties["rmdNotebooks.r.terminalArgs"].default, [...DEFAULT_TERMINAL_R_ARGS]);
+    assert.equal(properties["rmdNotebooks.r.sourceVscodeRSessionWatcher"].default, true);
   });
 });
 

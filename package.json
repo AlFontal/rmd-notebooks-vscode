@@ -12,6 +12,9 @@
     "type": "git",
     "url": "https://github.com/AlFontal/rmd-notebooks-vscode.git"
   },
+  "extensionDependencies": [
+    "REditorSupport.r"
+  ],
   "bugs": {
     "url": "https://github.com/AlFontal/rmd-notebooks-vscode/issues"
   },
@@ -126,8 +129,7 @@
             "type": "string"
           },
           "default": [
-            "--slave",
-            "--vanilla"
+            "--slave"
           ],
           "description": "Arguments passed to the R executable when starting an inline chunk-execution session."
         },
@@ -140,6 +142,11 @@
             "--vanilla"
           ],
           "description": "Arguments passed to the R executable when starting the interactive R terminal."
+        },
+        "rmdNotebooks.r.sourceVscodeRSessionWatcher": {
+          "type": "boolean",
+          "default": true,
+          "description": "Source ~/.vscode-R/init.R in inline R sessions when present. This can let vscode-R attach its session watcher to inline notebook sessions."
         },
         "rmdNotebooks.execution.interactiveFallbackTimeoutMs": {
           "type": "number",
@@ -210,7 +217,8 @@
     "test:unit": "npm run compile && mocha \"out/src/test/**/*.test.js\"",
     "test:vscode": "npm run compile && node ./out/test/vscode/runVscodeTests.js",
     "test": "npm run test:unit && npm run test:vscode",
-    "smoke:renv": "Rscript --vanilla scripts/smoke_renv_startup.R"
+    "smoke:renv": "Rscript --vanilla scripts/smoke_renv_startup.R",
+    "smoke:vscode-r": "Rscript --vanilla scripts/smoke_vscode_r_session_watcher.R"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.6.0",
