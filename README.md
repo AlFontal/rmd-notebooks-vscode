@@ -113,6 +113,14 @@ npm run smoke:vscode-r
 
 This starts the inline R protocol with the vscode-R watcher enabled and verifies that variables created by a piped inline chunk appear in vscode-R's `workspace.json`.
 
+To create a shareable test build from the current branch, run:
+
+```bash
+npm run package:vsix:test
+```
+
+This produces a `.vsix` file with the package version, branch name, and commit SHA in the filename.
+
 On macOS, the VS Code extension-host portion of `npm test` may abort if it is launched from a restrictive sandbox. If that happens, rerun `npm run test:vscode` from a normal local shell/session outside the sandbox.
 
 Manual visual sessions:
@@ -127,7 +135,8 @@ npm run dev:example:rmd
 ## CI/CD
 
 - GitHub Actions runs the lightweight repository checks on pushes and pull requests.
-- GitHub Actions also handles the release path: it packages the extension as a `.vsix`, attaches it to GitHub releases, and publishes release tags to both the VS Code Marketplace and Open VSX.
+- Pull request builds upload a branch-and-SHA-named `.vsix` artifact for manual testing.
+- GitHub Actions also handles the release path: it checks that the release tag matches `package.json`, packages the extension as a `.vsix`, attaches it to GitHub releases, and publishes release tags to both the VS Code Marketplace and Open VSX.
 - The full macOS extension-host test flow is kept as a local verification step via `npm test`.
 
 ## Example notebooks

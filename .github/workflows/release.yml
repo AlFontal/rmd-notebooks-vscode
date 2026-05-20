@@ -37,6 +37,7 @@ jobs:
           cache: npm
 
       - run: npm ci
+      - run: npm run release:verify-version
       - run: npm run test:unit
       - run: npm run package:vsix
 
