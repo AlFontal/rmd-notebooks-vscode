@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- attach inline R sessions to vscode-R so variables can appear in the R workspace viewer
+- run inline chunks in `.GlobalEnv` and honor project `.Rprofile` startup by default
+- add vscode-R as an extension dependency
+- add a setting to disable vscode-R session watcher sourcing for inline sessions
+- fix restart-session resolution when notebook focus is outside the active notebook editor
+- add smoke coverage for vscode-R workspace watcher integration
+
 ## 0.2.0
 
 - preserve chunk header options such as `eval=FALSE`, `fig.width`, `echo=FALSE`, and `warning=FALSE` when saving after body edits

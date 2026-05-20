@@ -20,10 +20,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:unit
-      - run: npm run package:vsix
-        if: github.event_name == 'pull_request' && github.event.action == 'ready_for_review'
+      - run: npm run package:vsix:test
+        if: github.event_name == 'pull_request'
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'pull_request' && github.event.action == 'ready_for_review'
+        if: github.event_name == 'pull_request'
         with:
           name: rmd-notebooks-vsix
           path: "*.vsix"
