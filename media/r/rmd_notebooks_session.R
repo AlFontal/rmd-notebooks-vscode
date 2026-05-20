@@ -1,4 +1,6 @@
-state_env <- new.env(parent = globalenv())
+local({
+protocol_env <- new.env(parent = emptyenv())
+user_env <- globalenv()
 
 options(menu.graphics = FALSE)
 
@@ -73,8 +75,8 @@ rmd_notebooks_read_prompt_response <- function() {
 }
 
 rmd_notebooks_emit_protocol_lines <- function(lines) {
-  output_connection <- get0("active_stdout_connection", envir = state_env, inherits = FALSE)
-  message_connection <- get0("active_stderr_connection", envir = state_env, inherits = FALSE)
+  output_connection <- get0("active_stdout_connection", envir = protocol_env, inherits = FALSE)
+  message_connection <- get0("active_stderr_connection", envir = protocol_env, inherits = FALSE)
   output_was_sunk <- sink.number() > 0
   message_was_sunk <- sink.number(type = "message") > 2
 
@@ -206,6 +208,82 @@ rmd_notebooks_patch_binding <- function(environment, name, value) {
   invisible(TRUE)
 }
 
+rmd_notebooks_patch_attached_package_binding <- function(package, name, value) {
+  environment_name <- paste0("package:", package)
+  if (!environment_name %in% search()) {
+    return(invisible(FALSE))
+  }
+
+  rmd_notebooks_patch_binding(as.environment(environment_name), name, value)
+}
+
+rmd_notebooks_source_vscode_r_session_watcher <- function() {
+  if (!identical(Sys.getenv("RMD_NOTEBOOKS_SOURCE_VSCODE_R_INIT"), "1")) {
+    return(invisible(FALSE))
+  }
+
+  init_path <- file.path(path.expand("~"), ".vscode-R", "init.R")
+  if (!file.exists(init_path)) {
+    return(invisible(FALSE))
+  }
+
+  tryCatch({
+    init_text <- readLines(init_path, warn = FALSE)
+    init_line <- init_text[grepl("R/session/init[.]R", init_text)][1]
+    if (is.na(init_line)) {
+      return(invisible(FALSE))
+    }
+
+    vsc_path <- sub('^local\\(source\\("([^"]+)".*$', "\\1", init_line)
+    if (!nzchar(vsc_path) || !file.exists(vsc_path)) {
+      return(invisible(FALSE))
+    }
+
+    if ("tools:vscode" %in% search()) {
+      detach("tools:vscode", character.only = TRUE)
+    }
+
+    vsc_parent <- new.env(parent = user_env)
+    vsc_env <- new.env(parent = vsc_parent)
+    assign(".vsc", vsc_env, envir = vsc_parent)
+    assign("dir_init", dirname(vsc_path), envir = vsc_env)
+    source(file.path(dirname(vsc_path), "vsc.R"), local = vsc_env)
+
+    exports <- local({
+      .vsc <- vsc_env
+      .vsc.attach <- .vsc$attach
+      .vsc.view <- .vsc$show_dataview
+      .vsc.browser <- .vsc$show_browser
+      .vsc.viewer <- .vsc$show_viewer
+      .vsc.page_viewer <- .vsc$show_page_viewer
+      View <- .vsc.view
+      environment()
+    })
+    attach(exports, name = "tools:vscode", warn.conflicts = FALSE)
+    exports$.vsc.attach()
+    assign("vscode_r_session_watcher_env", vsc_env, envir = protocol_env)
+    invisible(TRUE)
+  }, error = function(error_condition) {
+    message(sprintf("Unable to source vscode-R session watcher init.R: %s", conditionMessage(error_condition)))
+    invisible(FALSE)
+  })
+}
+
+rmd_notebooks_update_vscode_r_workspace <- function() {
+  vsc_env <- get0("vscode_r_session_watcher_env", envir = protocol_env, inherits = FALSE)
+  if (is.null(vsc_env) || !exists("update_workspace", envir = vsc_env, inherits = FALSE)) {
+    return(invisible(FALSE))
+  }
+
+  tryCatch({
+    vsc_env$update_workspace()
+    invisible(TRUE)
+  }, error = function(error_condition) {
+    message(sprintf("Unable to update vscode-R workspace: %s", conditionMessage(error_condition)))
+    invisible(FALSE)
+  })
+}
+
 rmd_notebooks_execute <- function(code, working_directory, artifact_directory, plot_width_in, plot_height_in, plot_dpi) {
   if (nzchar(working_directory) && dir.exists(working_directory)) {
     setwd(working_directory)
@@ -221,8 +299,8 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
   html_buffer <- character()
   stdout_connection <- textConnection("stdout_buffer", "w", local = TRUE)
   stderr_connection <- textConnection("stderr_buffer", "w", local = TRUE)
-  assign("active_stdout_connection", stdout_connection, envir = state_env)
-  assign("active_stderr_connection", stderr_connection, envir = state_env)
+  assign("active_stdout_connection", stdout_connection, envir = protocol_env)
+  assign("active_stderr_connection", stderr_connection, envir = protocol_env)
   width_in <- if (is.finite(plot_width_in) && plot_width_in > 0) plot_width_in else 10
   height_in <- if (is.finite(plot_height_in) && plot_height_in > 0) plot_height_in else 7.5
   dpi <- if (is.finite(plot_dpi) && plot_dpi > 0) plot_dpi else 96
@@ -244,7 +322,7 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
     withCallingHandlers({
       expressions <- parse(text = code, keep.source = FALSE)
       for (expression in expressions) {
-        result <- withVisible(eval(expression, envir = state_env))
+        result <- withVisible(eval(expression, envir = user_env))
         if (result$visible && !is.null(result$value)) {
           html_output <- rmd_notebooks_render_html(result$value)
           if (!is.null(html_output)) {
@@ -269,12 +347,14 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
     message("Execution interrupted.")
   })
 
+  rmd_notebooks_update_vscode_r_workspace()
+
   grDevices::dev.off()
   sink(type = "message")
   sink()
   close(stdout_connection)
   close(stderr_connection)
-  rm(list = c("active_stdout_connection", "active_stderr_connection"), envir = state_env)
+  rm(list = c("active_stdout_connection", "active_stderr_connection"), envir = protocol_env)
 
   list(
     success = success,
@@ -289,16 +369,16 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
 
 assign("rmd_notebooks_html", function(html) {
   structure(list(html = paste(html, collapse = "\n")), class = "rmd_notebooks_html")
-}, envir = state_env)
+}, envir = user_env)
 
-assign("inline_chunks_html", get("rmd_notebooks_html", envir = state_env), envir = state_env)
-assign("readline", rmd_notebooks_readline, envir = state_env)
-assign("menu", rmd_notebooks_menu, envir = state_env)
-assign("askYesNo", rmd_notebooks_ask_yes_no, envir = state_env)
+assign("inline_chunks_html", get("rmd_notebooks_html", envir = user_env), envir = user_env)
 
 rmd_notebooks_patch_binding(baseenv(), "readline", rmd_notebooks_readline)
 rmd_notebooks_patch_binding(asNamespace("utils"), "menu", rmd_notebooks_menu)
 rmd_notebooks_patch_binding(asNamespace("utils"), "askYesNo", rmd_notebooks_ask_yes_no)
+rmd_notebooks_patch_attached_package_binding("utils", "menu", rmd_notebooks_menu)
+rmd_notebooks_patch_attached_package_binding("utils", "askYesNo", rmd_notebooks_ask_yes_no)
+rmd_notebooks_source_vscode_r_session_watcher()
 
 cat("RMD_NOTEBOOKS_READY\n")
 flush.console()
@@ -366,3 +446,4 @@ repeat {
   cat("RMD_NOTEBOOKS_RESULT_END\n")
   flush.console()
 }
+})

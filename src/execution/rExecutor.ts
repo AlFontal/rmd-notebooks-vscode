@@ -135,8 +135,9 @@ export class RExecutor implements Executor {
     const configuration = vscode.workspace.getConfiguration("rmdNotebooks");
     const rPath = configuration.get<string>("r.path", "R");
     const rArgs = getInlineRArgs(configuration);
+    const sourceVscodeRSessionWatcher = configuration.get<boolean>("r.sourceVscodeRSessionWatcher", true);
     const sessionScriptPath = path.join(this.extensionUri.fsPath, "media", "r", "rmd_notebooks_session.R");
-    const created = new RSession(rPath, rArgs, sessionScriptPath, workspaceFolder);
+    const created = new RSession(rPath, rArgs, sessionScriptPath, workspaceFolder, sourceVscodeRSessionWatcher);
     this.sessions.set(documentUri, created);
     return created;
   }
@@ -161,10 +162,20 @@ class RSession {
   private sessionReady = false;
   private runtimeStderr = "";
 
-  public constructor(rPath: string, rArgs: string[], scriptPath: string, startupDirectory?: string) {
+  public constructor(
+    rPath: string,
+    rArgs: string[],
+    scriptPath: string,
+    startupDirectory?: string,
+    sourceVscodeRSessionWatcher = true
+  ) {
     this.process = spawn(rPath, rArgs, {
       stdio: "pipe",
-      cwd: startupDirectory
+      cwd: startupDirectory,
+      env: {
+        ...process.env,
+        RMD_NOTEBOOKS_SOURCE_VSCODE_R_INIT: sourceVscodeRSessionWatcher ? "1" : "0"
+      }
     });
 
     this.lineReader = readline.createInterface({

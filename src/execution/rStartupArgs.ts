@@ -1,4 +1,4 @@
-export const DEFAULT_INLINE_R_ARGS = ["--slave", "--vanilla"] as const;
+export const DEFAULT_INLINE_R_ARGS = ["--slave"] as const;
 export const DEFAULT_TERMINAL_R_ARGS = ["--vanilla"] as const;
 
 interface ConfigurationReader {

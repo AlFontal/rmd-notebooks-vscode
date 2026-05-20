@@ -73,17 +73,17 @@ Common prompt-style interactions such as `menu()` and `readline()` are handled i
 ## Settings
 
 - `rmdNotebooks.r.path`: path to the R executable.
-- `rmdNotebooks.r.args`: arguments for inline chunk-execution R sessions. Defaults to `["--slave", "--vanilla"]`.
+- `rmdNotebooks.r.args`: arguments for inline chunk-execution R sessions. Defaults to `["--slave"]`.
 - `rmdNotebooks.r.terminalArgs`: arguments for the interactive R terminal. Defaults to `["--vanilla"]`.
+- `rmdNotebooks.r.sourceVscodeRSessionWatcher`: source `~/.vscode-R/init.R` in inline R sessions when present. This lets vscode-R attach its session watcher to inline notebook sessions. Defaults to `true`.
 - `rmdNotebooks.execution.interactiveFallbackTimeoutMs`: optional timeout for treating a stalled inline chunk as unsupported interactive input. Defaults to `0`, which disables the timeout.
 - `rmdNotebooks.execution.interactiveFallbackBehavior`: what to do when the optional interactive fallback timeout fires. Defaults to `prompt`.
 
-For projects that rely on startup files, such as `renv` projects that auto-activate from `.Rprofile`, remove `--vanilla` from the relevant setting. For example:
+Inline R sessions honor normal R startup files by default, including project `.Rprofile` files used by tools such as `renv`. To isolate inline sessions from startup files, add `--vanilla`:
 
 ```json
 {
-  "rmdNotebooks.r.args": ["--slave"],
-  "rmdNotebooks.r.terminalArgs": []
+  "rmdNotebooks.r.args": ["--slave", "--vanilla"]
 }
 ```
 
@@ -103,7 +103,15 @@ For changes that affect R startup behavior, run the local `renv` smoke test:
 npm run smoke:renv
 ```
 
-This creates a temporary `renv` project and verifies that the default `--vanilla` startup flags skip project activation while `renv`-compatible args allow the project library to load. The command may install `renv` into a temporary bootstrap library if it is not already available.
+This creates a temporary `renv` project and verifies that the default inline startup args activate the project while `--vanilla` keeps an inline session isolated. The command may install `renv` into a temporary bootstrap library if it is not already available.
+
+For changes that affect vscode-R session watcher integration, run:
+
+```bash
+npm run smoke:vscode-r
+```
+
+This starts the inline R protocol with the vscode-R watcher enabled and verifies that variables created by a piped inline chunk appear in vscode-R's `workspace.json`.
 
 On macOS, the VS Code extension-host portion of `npm test` may abort if it is launched from a restrictive sandbox. If that happens, rerun `npm run test:vscode` from a normal local shell/session outside the sandbox.
 

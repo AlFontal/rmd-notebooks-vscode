@@ -83,13 +83,14 @@ describe("Rmd Notebooks Notebook Host", () => {
   });
 
   beforeEach(async () => {
+    await closeAllEditors();
     await resetIntegrationFixtures();
     await resetTestSettings();
   });
 
   afterEach(async () => {
     extensionApi.clearTestPromptResponses();
-    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    await closeAllEditors();
     vscode.window.terminals.forEach((terminal) => terminal.dispose());
   });
 
@@ -159,6 +160,74 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(state.outputs.some((record) => record.outputTypes.includes("html")));
   });
 
+  it("evaluates inline chunks in the global environment without exposing protocol internals", async () => {
+    await writeFixture(
+      "global-env.qmd",
+      [
+        "# Global environment",
+        "",
+        "```{r global-check}",
+        "x_global_probe <- 42",
+        "cat(sprintf('global=%s\\n', exists('x_global_probe', envir = .GlobalEnv, inherits = FALSE)))",
+        "cat(sprintf('protocol=%s\\n', exists('rmd_notebooks_execute', envir = .GlobalEnv, inherits = FALSE)))",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("global-env.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const codeCell = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
+    const renderedCell = await waitForNotebookOutput(codeCell, (cell) =>
+      cell.outputs.some((output) =>
+        output.items.some((item) => Buffer.from(item.data).toString("utf8").includes("global=TRUE"))
+      )
+    );
+
+    const outputText = renderedCell.outputs
+      .flatMap((output) => output.items)
+      .map((item) => Buffer.from(item.data).toString("utf8"))
+      .join("\n");
+    assert.ok(outputText.includes("global=TRUE"));
+    assert.ok(outputText.includes("protocol=FALSE"));
+  });
+
+  it("honors project .Rprofile startup files by default", async () => {
+    await writeFixture(".Rprofile", "rprofile_marker <- 41\n");
+    await writeFixture(
+      "rprofile-startup.qmd",
+      [
+        "# R profile startup",
+        "",
+        "```{r profile-check}",
+        "rprofile_marker + 1",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("rprofile-startup.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const codeCell = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
+    const renderedCell = await waitForNotebookOutput(codeCell, (cell) =>
+      cell.outputs.some((output) =>
+        output.items.some((item) => Buffer.from(item.data).toString("utf8").includes("[1] 42"))
+      )
+    );
+
+    assert.ok(
+      renderedCell.outputs.some((output) =>
+        output.items.some((item) => Buffer.from(item.data).toString("utf8").includes("[1] 42"))
+      )
+    );
+  });
+
   it("runs all qmd chunks and renders a plot inline", async () => {
     const editor = await openNotebookEditor("integration.qmd");
 
@@ -200,7 +269,20 @@ describe("Rmd Notebooks Notebook Host", () => {
   });
 
   it("edits chunk header metadata and preserves it in raw source", async () => {
-    const editor = await openNotebookEditor("integration.qmd");
+    await writeFixture(
+      "edit-header.qmd",
+      [
+        "# Edit header",
+        "",
+        "```{r first}",
+        "x <- 1",
+        "x + 1",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("edit-header.qmd");
     const codeCellIndex = findFirstCodeCellIndex(editor.notebook);
     editor.selection = singleCellRange(codeCellIndex);
 
@@ -371,7 +453,20 @@ describe("Rmd Notebooks Notebook Host", () => {
   });
 
   it("marks qmd output stale after editing the cell body", async () => {
-    const editor = await openNotebookEditor("integration.qmd");
+    await writeFixture(
+      "stale-output.qmd",
+      [
+        "# Stale output",
+        "",
+        "```{r first}",
+        "x <- 1",
+        "x + 1",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("stale-output.qmd");
     editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
     await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
 
@@ -394,7 +489,27 @@ describe("Rmd Notebooks Notebook Host", () => {
   });
 
   it("clears current output and all outputs for notebooks", async () => {
-    const editor = await openNotebookEditor("integration.qmd");
+    await writeFixture(
+      "clear-output.qmd",
+      [
+        "# Clear output",
+        "",
+        "```{r first}",
+        "1 + 1",
+        "```",
+        "",
+        "```{r second}",
+        "2 + 2",
+        "```",
+        "",
+        "```{r plotter}",
+        "plot(cars)",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("clear-output.qmd");
     await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
     await waitForDocumentState(editor.notebook.uri, (candidate) => candidate.outputs.length === 3);
 
@@ -695,18 +810,41 @@ async function openNotebookEditor(name: string): Promise<vscode.NotebookEditor> 
 async function resetIntegrationFixtures(): Promise<void> {
   await writeFixture("integration.qmd", INTEGRATION_QMD);
   await writeFixture("integration.rmd", INTEGRATION_RMD);
+  await deleteWorkspaceFile(".Rprofile");
+}
+
+async function closeAllEditors(): Promise<void> {
+  await vscode.commands.executeCommand("workbench.action.files.saveAll");
+  await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+  await waitFor(
+    () => (vscode.window.visibleNotebookEditors.length === 0 && vscode.window.visibleTextEditors.length === 0 ? true : undefined),
+    2000
+  ).catch(() => undefined);
+  await sleep(100);
 }
 
 async function writeFixture(name: string, contents: string): Promise<void> {
   await vscode.workspace.fs.writeFile(getWorkspaceFileUri(name), Buffer.from(contents, "utf8"));
 }
 
+async function deleteWorkspaceFile(name: string): Promise<void> {
+  try {
+    await vscode.workspace.fs.delete(getWorkspaceFileUri(name), { useTrash: false });
+  } catch (error) {
+    if (!(error instanceof vscode.FileSystemError)) {
+      throw error;
+    }
+  }
+}
+
 async function resetTestSettings(): Promise<void> {
+  await updateTestSetting("r.args", undefined);
+  await updateTestSetting("r.sourceVscodeRSessionWatcher", false);
   await updateTestSetting("execution.interactiveFallbackTimeoutMs", 0);
   await updateTestSetting("execution.interactiveFallbackBehavior", "prompt");
 }
 
-async function updateTestSetting(section: string, value: string | number): Promise<void> {
+async function updateTestSetting(section: string, value: unknown): Promise<void> {
   await vscode.workspace.getConfiguration("rmdNotebooks").update(section, value, vscode.ConfigurationTarget.Workspace);
 }
 

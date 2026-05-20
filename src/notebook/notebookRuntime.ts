@@ -576,7 +576,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
   private resolveNotebook(documentUri?: string): vscode.NotebookDocument | undefined {
     if (!documentUri) {
-      return vscode.window.activeNotebookEditor?.notebook;
+      return (
+        vscode.window.activeNotebookEditor?.notebook ??
+        vscode.window.visibleNotebookEditors.find((editor) => isInlineChunksNotebook(editor.notebook))?.notebook ??
+        vscode.workspace.notebookDocuments.find((notebook) => isInlineChunksNotebook(notebook))
+      );
     }
 
     return (

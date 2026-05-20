@@ -73,19 +73,19 @@ format_args <- function(args) {
 cases <- list(
   list(
     label = "inline default",
-    config_args = c("--slave", "--vanilla"),
-    process_args = c("--slave", "--vanilla"),
-    startup_directory = project_root,
-    expect_renv = FALSE,
-    expect_package = FALSE
-  ),
-  list(
-    label = "inline renv-compatible",
     config_args = c("--slave"),
     process_args = c("--slave"),
     startup_directory = project_root,
     expect_renv = TRUE,
     expect_package = TRUE
+  ),
+  list(
+    label = "inline isolated",
+    config_args = c("--slave", "--vanilla"),
+    process_args = c("--slave", "--vanilla"),
+    startup_directory = project_root,
+    expect_renv = FALSE,
+    expect_package = FALSE
   ),
   list(
     label = "terminal default",
