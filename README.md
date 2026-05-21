@@ -13,13 +13,9 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-2E8B57" />
 </p>
 
-Open `.Rmd` and `.qmd` files as runnable R notebooks in VS Code while keeping the source file on disk in fenced-source form.
+Run `.Rmd` and `.qmd` files as source-preserving notebooks in VS Code, with inline R execution, persisted outputs, plots, and vscode-R workspace integration.
 
-For many R users, the default workflow has long been R Markdown in RStudio: write code in chunks, run them inline, and inspect plots and tables right where they were produced. Quarto (`.qmd`) keeps that same chunk-oriented workflow while broadening the document model.
-
-In VS Code, that experience has usually been weaker. You can edit `.Rmd` and `.qmd` as text, and you can send code to an R terminal, but you do not normally get a proper inline notebook workflow with rendered outputs living next to the code.
-
-This extension closes most of that gap. It opens `.Rmd` and `.qmd` files as runnable R notebooks in VS Code, keeps the underlying source on disk in fenced-source form, and lets you switch back to the raw file whenever you want.
+Rmd Notebooks opens R Markdown and Quarto documents as runnable notebooks without converting the file on disk. Code cells come from fenced chunks, outputs render inline, and the original source remains available whenever you want to inspect or edit it directly.
 
 ## Demo
 
@@ -31,28 +27,59 @@ This extension closes most of that gap. It opens `.Rmd` and `.qmd` files as runn
 - Positron: install from [Open VSX](https://open-vsx.org/extension/AlFontal/rmd-notebooks-vscode)
 - Manual: download the `.vsix` from the [GitHub releases page](https://github.com/AlFontal/rmd-notebooks-vscode/releases)
 
-## Status
+## Requirements
 
-This project is working and publishable as a preview extension.
+- VS Code `^1.88.0`
+- R available on your PATH, or configured with `rmdNotebooks.r.path`
+- The [vscode-R extension](https://marketplace.visualstudio.com/items?itemName=REditorSupport.r), installed automatically as an extension dependency
 
-Current capabilities:
+The vscode-R dependency is used for normal R tooling integration, including the R workspace viewer. Inline sessions can source vscode-R's session watcher so variables created in notebook chunks appear in the R sidebar.
 
-- opens `.Rmd` and `.qmd` as notebooks
-- runs R code cells in a persistent per-document R session
-- renders inline stdout, stderr, HTML, and static plots
-- restores cached outputs on reopen
-- marks outputs stale after code edits
-- supports chunk-header editing from notebook mode
-- supports inline prompt UI for common R interactions such as `menu()` and `readline()`
-- lets you switch between notebook view and raw source view
+## What It Does
 
-Current limits:
+- Opens `.Rmd`, `.rmd`, and `.qmd` files as notebooks
+- Runs R chunks in a persistent per-document R session
+- Evaluates inline chunks in `.GlobalEnv`, so user variables are normal R workspace variables
+- Honors normal R startup files by default, including project `.Rprofile` files used by tools such as `renv`
+- Shows inline stdout, stderr, HTML snippets, and static PNG plots
+- Persists outputs and restores them when the document is reopened
+- Marks outputs stale after code edits
+- Supports notebook commands for run current chunk, run all chunks, restart session, clear outputs, and source view
+- Supports chunk-header editing from notebook mode
+- Handles common prompt-style interactions such as `menu()` and `readline()` with VS Code UI
+- Lets unsupported interactive chunks fall back to an R terminal when the optional timeout is enabled
 
-- R only
-- static image plots only
-- no htmlwidgets
-- only a small subset of knitr options is enforced today: `eval=FALSE`, `include=FALSE`, `results='hide'`
-- unsupported interactive flows can fall back to an R terminal if you enable the timeout
+## Workspace Viewer
+
+Inline R sessions integrate with vscode-R's workspace watcher when `~/.vscode-R/init.R` is available. With the default settings, variables created from notebook chunks should appear under the R sidebar's Global Environment section.
+
+You can verify the integration from a notebook cell:
+
+```r
+x <- 42
+df <- data.frame(a = 1:3, b = letters[1:3])
+
+cat("attached=", "tools:vscode" %in% search(), "\n")
+cat("workspace=", file.exists(file.path(tempdir(), "vscode-R", "workspace.json")), "\n")
+```
+
+If you do not want inline sessions to source vscode-R's watcher, disable:
+
+```json
+{
+  "rmdNotebooks.r.sourceVscodeRSessionWatcher": false
+}
+```
+
+## Current Limits
+
+- R is the only supported execution language
+- Plots are captured as static PNG images
+- htmlwidgets and full HTML dependency lifecycles are not supported yet
+- Only a subset of knitr options is enforced today: `eval=FALSE`, `include=FALSE`, `results='hide'`, `fig.width`, `fig.height`, `fig.asp`, and `dpi`
+- `echo`, `warning`, and `message` are parsed but not fully enforced
+- Unsupported interactive flows can fall back to an R terminal only when `rmdNotebooks.execution.interactiveFallbackTimeoutMs` is enabled
+- vscode-R workspace integration depends on vscode-R's current session watcher internals
 
 ## Commands
 
@@ -68,18 +95,16 @@ Current limits:
 
 The notebook toolbar also exposes `Restart R Session` and `View Source`.
 
-Common prompt-style interactions such as `menu()` and `readline()` are handled inline with VS Code pickers and input boxes. The notebook Stop button interrupts the current inline R execution without restarting the session. If execution still appears to stall because a chunk wants unsupported interactive input, you can enable a timeout that prompts to run that chunk in an integrated R terminal instead. This is controlled by `rmdNotebooks.execution.interactiveFallbackBehavior` and `rmdNotebooks.execution.interactiveFallbackTimeoutMs`; the timeout is disabled by default with a value of `0`.
-
 ## Settings
 
-- `rmdNotebooks.r.path`: path to the R executable.
+- `rmdNotebooks.r.path`: path to the R executable. Defaults to `R`.
 - `rmdNotebooks.r.args`: arguments for inline chunk-execution R sessions. Defaults to `["--slave"]`.
 - `rmdNotebooks.r.terminalArgs`: arguments for the interactive R terminal. Defaults to `["--vanilla"]`.
-- `rmdNotebooks.r.sourceVscodeRSessionWatcher`: source `~/.vscode-R/init.R` in inline R sessions when present. This lets vscode-R attach its session watcher to inline notebook sessions. Defaults to `true`.
-- `rmdNotebooks.execution.interactiveFallbackTimeoutMs`: optional timeout for treating a stalled inline chunk as unsupported interactive input. Defaults to `0`, which disables the timeout.
+- `rmdNotebooks.r.sourceVscodeRSessionWatcher`: source `~/.vscode-R/init.R` in inline R sessions when present. Defaults to `true`.
+- `rmdNotebooks.execution.interactiveFallbackTimeoutMs`: timeout for treating a stalled inline chunk as unsupported interactive input. Defaults to `0`, which disables the timeout.
 - `rmdNotebooks.execution.interactiveFallbackBehavior`: what to do when the optional interactive fallback timeout fires. Defaults to `prompt`.
 
-Inline R sessions honor normal R startup files by default, including project `.Rprofile` files used by tools such as `renv`. To isolate inline sessions from startup files, add `--vanilla`:
+Inline R sessions honor normal startup files by default. To isolate inline sessions from project startup files, add `--vanilla`:
 
 ```json
 {
@@ -139,7 +164,7 @@ npm run dev:example:rmd
 - GitHub Actions also handles the release path: it checks that the release tag matches `package.json`, packages the extension as a `.vsix`, attaches it to GitHub releases, and publishes release tags to both the VS Code Marketplace and Open VSX.
 - The full macOS extension-host test flow is kept as a local verification step via `npm test`.
 
-## Example notebooks
+## Example Notebooks
 
 - `test/manual-workspace/example.qmd`
 - `test/manual-workspace/example.rmd`
