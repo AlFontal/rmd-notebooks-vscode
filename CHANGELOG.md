@@ -2,6 +2,7 @@
 
 ## 0.3.0
 
+- Add `rmdNotebooks.r.startupTimeoutMs` to configure the inline R session startup budget (default 10000ms), for projects with slow R startup (renv, heavy `.Rprofile`, Bioconductor).
 - attach inline R sessions to vscode-R so variables can appear in the R workspace viewer
 - run inline chunks in `.GlobalEnv` and honor project `.Rprofile` startup by default
 - add vscode-R as an extension dependency
