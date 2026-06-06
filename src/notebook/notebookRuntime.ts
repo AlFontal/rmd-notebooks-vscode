@@ -79,7 +79,12 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       this.controller,
       vscode.workspace.onDidOpenNotebookDocument((notebook) => void this.handleNotebookOpened(notebook)),
       vscode.workspace.onDidChangeNotebookDocument((event) => void this.handleNotebookChanged(event)),
-      vscode.workspace.onDidCloseNotebookDocument((notebook) => void this.handleNotebookClosed(notebook))
+      vscode.workspace.onDidCloseNotebookDocument((notebook) => void this.handleNotebookClosed(notebook)),
+      vscode.window.onDidChangeActiveNotebookEditor((editor) => {
+        if (editor && isInlineChunksNotebook(editor.notebook)) {
+          void this.restoreOutputsToNotebook(editor.notebook);
+        }
+      })
     );
 
     for (const notebook of vscode.workspace.notebookDocuments) {
@@ -546,7 +551,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   }
 
   private async restoreOutputsToNotebook(notebook: vscode.NotebookDocument): Promise<void> {
-    const snapshot = this.snapshots.get(notebook.uri.toString());
+    // On a window reload a notebook can become the active editor before its
+    // snapshot has been built (the active-editor event races with initialize),
+    // so build it on demand instead of bailing out and never restoring.
+    const snapshot = this.snapshots.get(notebook.uri.toString()) ?? (await this.refreshNotebook(notebook));
     if (!snapshot) {
       return;
     }
@@ -555,21 +563,36 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     if (outputs.size === 0) {
       return;
     }
+
+    const pending = snapshot.chunks.filter((entry) => {
+      const record = outputs.get(entry.chunk.identity.chunkId);
+      if (!record) {
+        return false;
+      }
+      return notebook.cellAt(entry.index).outputs.length === 0;
+    });
+    if (pending.length === 0) {
+      return;
+    }
+
     const selected = await this.ensureControllerSelected(notebook);
     if (!selected) {
       return;
     }
     await this.withOutputSync(notebook.uri.toString(), async () => {
-      for (const entry of snapshot.chunks) {
+      for (const entry of pending) {
         const record = outputs.get(entry.chunk.identity.chunkId);
         if (!record) {
           continue;
         }
 
         const execution = this.controller.createNotebookCellExecution(notebook.cellAt(entry.index));
-        execution.start(Date.now());
+        // Restoring previously captured output is not a real run, so omit the
+        // timestamps: passing capturedAt (in the past) as the end time made
+        // VS Code render a negative duration like "-50.-4s".
+        execution.start();
         await execution.replaceOutput(await createNotebookOutputs(record));
-        execution.end(record.status === "success", record.capturedAt ?? Date.now());
+        execution.end(record.status === "success");
       }
     });
   }
