@@ -140,6 +140,14 @@ export class RExecutor implements Executor {
     const sessionScriptPath = path.join(this.extensionUri.fsPath, "media", "r", "rmd_notebooks_session.R");
     const created = new RSession(rPath, rArgs, sessionScriptPath, workspaceFolder, sourceVscodeRSessionWatcher, startupTimeoutMs);
     this.sessions.set(documentUri, created);
+    // Evict a session that never becomes ready so the next run starts fresh
+    // instead of replaying the cached startup rejection.
+    created.ready().catch(() => {
+      if (this.sessions.get(documentUri) === created) {
+        this.sessions.delete(documentUri);
+      }
+      void created.dispose();
+    });
     return created;
   }
 }
