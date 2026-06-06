@@ -643,6 +643,73 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.equal(vscode.window.terminals.length, 0);
   });
 
+  it("times out starting the inline R session when the startup budget is too low", async () => {
+    await writeFixture(".Rprofile", "Sys.sleep(3)\n");
+    await writeFixture(
+      "startup-timeout.qmd",
+      [
+        "# Startup timeout",
+        "",
+        "```{r probe}",
+        "1 + 1",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    await updateTestSetting("r.startupTimeoutMs", 1000);
+
+    const editor = await openNotebookEditor("startup-timeout.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "error")
+    );
+
+    assert.ok(state.outputs.some((record) => record.status === "error"));
+    assert.match(state.outputChannelText, /Timed out starting R session/);
+  });
+
+  it("starts a fresh inline R session after a startup timeout instead of caching the failure", async () => {
+    await writeFixture(".Rprofile", "Sys.sleep(3)\n");
+    await writeFixture(
+      "startup-eviction.qmd",
+      [
+        "# Startup eviction",
+        "",
+        "```{r probe}",
+        "1 + 1",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("startup-eviction.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+
+    // First run: an undersized budget makes startup time out.
+    await updateTestSetting("r.startupTimeoutMs", 1000);
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "error")
+    );
+
+    // Raise the budget and re-run without "Restart R Session": the failed session
+    // must be evicted so a fresh one starts and succeeds.
+    await updateTestSetting("r.startupTimeoutMs", 30000);
+    await sleep(200);
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success" && record.outputTypes.includes("text"))
+    );
+
+    assert.ok(state.outputs.some((record) => record.status === "success"));
+    assert.match(state.outputChannelText, /\[1\] 2/);
+  });
+
   it("stops run-all after redirecting an interactive chunk to the R terminal", async () => {
     await writeFixture(
       "interactive-run-all.qmd",
@@ -840,6 +907,7 @@ async function deleteWorkspaceFile(name: string): Promise<void> {
 async function resetTestSettings(): Promise<void> {
   await updateTestSetting("r.args", undefined);
   await updateTestSetting("r.sourceVscodeRSessionWatcher", false);
+  await updateTestSetting("r.startupTimeoutMs", undefined);
   await updateTestSetting("execution.interactiveFallbackTimeoutMs", 0);
   await updateTestSetting("execution.interactiveFallbackBehavior", "prompt");
 }
