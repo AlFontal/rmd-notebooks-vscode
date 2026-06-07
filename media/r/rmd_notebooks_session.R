@@ -35,6 +35,92 @@ rmd_notebooks_render_html <- function(value) {
   NULL
 }
 
+rmd_notebooks_escape_html <- function(text) {
+  text <- as.character(text)
+  text <- gsub("&", "&amp;", text, fixed = TRUE)
+  text <- gsub("<", "&lt;", text, fixed = TRUE)
+  text <- gsub(">", "&gt;", text, fixed = TRUE)
+  text
+}
+
+rmd_notebooks_format_rows <- function(display) {
+  column_count <- length(display)
+  formatted <- lapply(seq_len(column_count), function(index) {
+    column <- display[[index]]
+    rendered <- format(column, trim = TRUE, justify = "left")
+    rendered[is.na(column)] <- "NA"
+    rmd_notebooks_escape_html(rendered)
+  })
+  row_labels <- rmd_notebooks_escape_html(rownames(display))
+  row_count <- nrow(display)
+
+  vapply(seq_len(row_count), function(row_index) {
+    cells <- vapply(formatted, function(column) column[row_index], character(1))
+    sprintf(
+      "<tr><th>%s</th>%s</tr>",
+      if (length(row_labels) >= row_index) row_labels[row_index] else "",
+      paste0("<td>", cells, "</td>", collapse = "")
+    )
+  }, character(1))
+}
+
+rmd_notebooks_data_frame_to_html <- function(df, max_rows) {
+  total_rows <- nrow(df)
+  total_cols <- ncol(df)
+  # Replicate pandas: show every row up to max_rows; once exceeded, collapse to the
+  # first and last rows (min_rows, capped at max_rows) with an ellipsis row between.
+  truncated <- is.finite(max_rows) && max_rows > 0 && total_rows > max_rows
+
+  body_rows <- character()
+  if (truncated) {
+    shown <- min(10L, as.integer(max_rows))
+    head_count <- as.integer(ceiling(shown / 2))
+    tail_count <- shown - head_count
+    head_rows <- rmd_notebooks_format_rows(head(df, head_count))
+    ellipsis <- sprintf(
+      "<tr class=\"rmd-df-ellipsis\"><th>...</th>%s</tr>",
+      paste(rep("<td>...</td>", total_cols), collapse = "")
+    )
+    body_rows <- c(head_rows, ellipsis)
+    if (tail_count > 0) {
+      body_rows <- c(body_rows, rmd_notebooks_format_rows(tail(df, tail_count)))
+    }
+  } else {
+    body_rows <- rmd_notebooks_format_rows(df)
+  }
+
+  header_cells <- paste0("<th>", rmd_notebooks_escape_html(names(df)), "</th>", collapse = "")
+  thead <- sprintf("<thead><tr><th></th>%s</tr></thead>", header_cells)
+  tbody <- sprintf("<tbody>%s</tbody>", paste(body_rows, collapse = ""))
+
+  # pandas only prints the dimensions line when the frame is truncated.
+  meta <- if (truncated) {
+    sprintf("<p class=\"rmd-df-meta\">%d rows &times; %d columns</p>", total_rows, total_cols)
+  } else {
+    ""
+  }
+
+  style <- paste(
+    ".rmd-df{color:var(--vscode-editor-foreground,var(--vscode-foreground));font-family:var(--vscode-font-family);font-size:var(--vscode-font-size,13px);padding:4px 0;max-width:100%;overflow-x:auto;}",
+    ".rmd-df table.dataframe{border-collapse:collapse;border:none;}",
+    ".rmd-df table.dataframe th,.rmd-df table.dataframe td{padding:0.3em 0.8em;text-align:right;white-space:nowrap;border:none;vertical-align:middle;}",
+    ".rmd-df table.dataframe thead th{font-weight:bold;background:var(--vscode-keybindingTable-headerBackground,var(--vscode-editorWidget-background));border-bottom:1px solid var(--vscode-editorWidget-border,var(--vscode-panel-border));}",
+    ".rmd-df table.dataframe tbody th{font-weight:bold;color:var(--vscode-descriptionForeground);}",
+    ".rmd-df table.dataframe tbody tr:nth-child(even){background:var(--vscode-list-hoverBackground);}",
+    ".rmd-df table.dataframe tbody tr:hover{background:var(--vscode-list-inactiveSelectionBackground);}",
+    ".rmd-df .rmd-df-meta{color:var(--vscode-descriptionForeground);font-size:0.9em;margin:6px 0 0;}",
+    sep = ""
+  )
+
+  sprintf(
+    "<div class=\"rmd-df\"><style>%s</style><table class=\"dataframe\">%s%s</table>%s</div>",
+    style,
+    thead,
+    tbody,
+    meta
+  )
+}
+
 rmd_notebooks_collect_plot_paths <- function(directory, started_at) {
   pattern <- sprintf("^plot-%s-.*\\.png$", started_at)
   if (!dir.exists(directory)) {
@@ -284,7 +370,7 @@ rmd_notebooks_update_vscode_r_workspace <- function() {
   })
 }
 
-rmd_notebooks_execute <- function(code, working_directory, artifact_directory, plot_width_in, plot_height_in, plot_dpi) {
+rmd_notebooks_execute <- function(code, working_directory, artifact_directory, plot_width_in, plot_height_in, plot_dpi, df_render, df_max_rows) {
   if (nzchar(working_directory) && dir.exists(working_directory)) {
     setwd(working_directory)
   }
@@ -325,6 +411,9 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
         result <- withVisible(eval(expression, envir = user_env))
         if (result$visible && !is.null(result$value)) {
           html_output <- rmd_notebooks_render_html(result$value)
+          if (is.null(html_output) && isTRUE(df_render) && is.data.frame(result$value)) {
+            html_output <- rmd_notebooks_data_frame_to_html(result$value, df_max_rows)
+          }
           if (!is.null(html_output)) {
             html_buffer <- c(html_buffer, html_output)
           } else {
@@ -398,6 +487,8 @@ repeat {
   plot_width_in <- readLines(con = stdin(), n = 1, warn = FALSE)
   plot_height_in <- readLines(con = stdin(), n = 1, warn = FALSE)
   plot_dpi <- readLines(con = stdin(), n = 1, warn = FALSE)
+  df_render_line <- readLines(con = stdin(), n = 1, warn = FALSE)
+  df_max_rows_line <- readLines(con = stdin(), n = 1, warn = FALSE)
   code_count_line <- readLines(con = stdin(), n = 1, warn = FALSE)
 
   working_directory <- sub("^WORKDIR:", "", working_directory)
@@ -405,6 +496,11 @@ repeat {
   plot_width_in <- sub("^PLOT_WIDTH:", "", plot_width_in)
   plot_height_in <- sub("^PLOT_HEIGHT:", "", plot_height_in)
   plot_dpi <- sub("^PLOT_DPI:", "", plot_dpi)
+  df_render <- !identical(sub("^DF_RENDER:", "", df_render_line), "0")
+  df_max_rows <- suppressWarnings(as.numeric(sub("^DF_MAX_ROWS:", "", df_max_rows_line)))
+  if (!is.finite(df_max_rows) || df_max_rows < 1) {
+    df_max_rows <- 50
+  }
   code_count <- suppressWarnings(as.integer(sub("^CODE_COUNT:", "", code_count_line)))
   if (!is.finite(code_count) || code_count < 0) {
     code_count <- 0L
@@ -432,7 +528,9 @@ repeat {
     rmd_notebooks_decode_line(artifact_directory),
     suppressWarnings(as.numeric(plot_width_in)),
     suppressWarnings(as.numeric(plot_height_in)),
-    suppressWarnings(as.numeric(plot_dpi))
+    suppressWarnings(as.numeric(plot_dpi)),
+    df_render,
+    df_max_rows
   )
 
   cat("RMD_NOTEBOOKS_RESULT_START\n")
