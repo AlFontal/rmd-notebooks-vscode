@@ -205,6 +205,17 @@
           "minimum": 120,
           "description": "Maximum height in pixels for inline plot previews before viewport scaling is applied."
         },
+        "rmdNotebooks.output.dataFrameRender": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render data frames as HTML tables (like Jupyter) instead of plain text."
+        },
+        "rmdNotebooks.output.dataFrameMaxRows": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "description": "Row threshold for rendered data frames. Frames with more rows are collapsed to the first and last rows with an ellipsis in between, like Jupyter."
+        },
         "rmdNotebooks.output.revealMode": {
           "type": "string",
           "enum": [
