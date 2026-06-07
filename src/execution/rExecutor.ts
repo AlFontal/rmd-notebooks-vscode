@@ -35,6 +35,11 @@ interface RawExecutionPayload {
   plots: string[];
 }
 
+interface DataFrameRenderOptions {
+  render: boolean;
+  maxRows: number;
+}
+
 interface PendingExecution {
   resolve: (payload: RawExecutionPayload) => void;
   reject: (error: Error) => void;
@@ -46,6 +51,7 @@ interface ExecutionRequest {
   workingDirectory?: string;
   artifactDirectory?: string;
   plot?: ExecutionContext["plot"];
+  dataFrame?: DataFrameRenderOptions;
   timeoutMs: number;
   promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>;
   onStart?: () => void;
@@ -75,12 +81,18 @@ export class RExecutor implements Executor {
 
   public async executeChunk(context: ExecutionContext): Promise<ExecutionResult> {
     const session = this.getOrCreateSession(context.documentUri, context.workspaceFolder);
-    const timeoutMs = vscode.workspace.getConfiguration("rmdNotebooks").get<number>("execution.interactiveFallbackTimeoutMs", 0);
+    const configuration = vscode.workspace.getConfiguration("rmdNotebooks");
+    const timeoutMs = configuration.get<number>("execution.interactiveFallbackTimeoutMs", 0);
+    const dataFrame: DataFrameRenderOptions = {
+      render: configuration.get<boolean>("output.dataFrameRender", true),
+      maxRows: configuration.get<number>("output.dataFrameMaxRows", 50)
+    };
     const payload = await session.execute(
       context.code,
       context.workspaceFolder,
       context.artifactDirectory,
       context.plot,
+      dataFrame,
       timeoutMs,
       context.prompt,
       context.onStart,
@@ -280,6 +292,7 @@ class RSession {
     workingDirectory?: string,
     artifactDirectory?: string,
     plot?: ExecutionContext["plot"],
+    dataFrame?: DataFrameRenderOptions,
     timeoutMs = 15000,
     promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>,
     onStart?: () => void,
@@ -289,7 +302,7 @@ class RSession {
     // running waits its turn and runs in order, like cells in a Jupyter notebook.
     return new Promise<RawExecutionPayload>((resolve, reject) => {
       const task: QueuedExecution = {
-        request: { code, workingDirectory, artifactDirectory, plot, timeoutMs, promptHandler, onStart },
+        request: { code, workingDirectory, artifactDirectory, plot, dataFrame, timeoutMs, promptHandler, onStart },
         resolve,
         reject
       };
@@ -393,6 +406,8 @@ class RSession {
     this.process.stdin.write(`PLOT_WIDTH:${request.plot?.widthInches ?? ""}\n`);
     this.process.stdin.write(`PLOT_HEIGHT:${request.plot?.heightInches ?? ""}\n`);
     this.process.stdin.write(`PLOT_DPI:${request.plot?.dpi ?? ""}\n`);
+    this.process.stdin.write(`DF_RENDER:${request.dataFrame?.render === false ? "0" : "1"}\n`);
+    this.process.stdin.write(`DF_MAX_ROWS:${request.dataFrame?.maxRows ?? ""}\n`);
     const codeLines = toProtocolLines(request.code);
     this.process.stdin.write(`CODE_COUNT:${codeLines.length}\n`);
     for (const line of codeLines) {
