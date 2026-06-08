@@ -2,7 +2,7 @@
 
 ## 0.3.0
 
-- Add `rmdNotebooks.r.startupTimeoutMs` to configure the inline R session startup budget (default 10000ms), for projects with slow R startup (renv, heavy `.Rprofile`, Bioconductor).
+- Add `rmdNotebooks.r.startupTimeoutMs` to configure the inline R session startup budget (default 30000ms), for projects with slow R startup (renv, heavy `.Rprofile`, Bioconductor). The startup timeout error now reports the budget and names the setting to raise.
 - Fix: an inline session that fails to start is no longer cached, so re-running a chunk retries from scratch instead of repeating the startup error.
 - attach inline R sessions to vscode-R so variables can appear in the R workspace viewer
 - run inline chunks in `.GlobalEnv` and honor project `.Rprofile` startup by default
