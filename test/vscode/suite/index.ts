@@ -9,6 +9,12 @@ export function run(): Promise<void> {
     timeout: 60000
   });
 
+  // Optional focus filter for local runs, e.g. RMD_NOTEBOOKS_TEST_GREP="interrupt".
+  const grep = process.env.RMD_NOTEBOOKS_TEST_GREP;
+  if (grep) {
+    mocha.grep(grep);
+  }
+
   const testsRoot = __dirname;
 
   return new Promise((resolve, reject) => {
