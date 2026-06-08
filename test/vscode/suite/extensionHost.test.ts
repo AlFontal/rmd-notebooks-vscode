@@ -824,6 +824,554 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.equal(vscode.window.terminals.length, 0);
   });
 
+  it("queues a chunk requested while another is still running", async () => {
+    await writeFixture(
+      "queue-order.qmd",
+      [
+        "# Queue order",
+        "",
+        "```{r slow}",
+        "Sys.sleep(2)",
+        "cat('first done\\n')",
+        "```",
+        "",
+        "```{r fast}",
+        "cat('second done\\n')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("queue-order.qmd");
+    const uri = editor.notebook.uri.toString();
+    const before = await extensionApi.getDocumentState(uri);
+    const [slowId, fastId] = before.snapshot?.chunkIds ?? [];
+    assert.ok(slowId && fastId, "Expected two chunk ids.");
+
+    // Start the slow chunk and wait until it is actually executing.
+    const slowRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, slowId);
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === slowId && record.status === "running")
+    );
+
+    // Requesting the second chunk while the first is busy should queue it, not error out.
+    const fastRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, fastId);
+    await Promise.all([slowRun, fastRun]);
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.filter((record) => record.status === "success").length === 2
+    );
+
+    assert.equal(state.outputs.filter((record) => record.status === "success").length, 2);
+    assert.ok(!state.outputChannelText.includes("already executing"), "The queued chunk should not be rejected.");
+    const firstIndex = state.outputChannelText.indexOf("first done");
+    const secondIndex = state.outputChannelText.indexOf("second done");
+    assert.ok(firstIndex >= 0 && secondIndex >= 0, "Both chunks should have produced stdout.");
+    assert.ok(firstIndex < secondIndex, "The queued chunk should run after the one already executing.");
+  });
+
+  it("preserves request order for back-to-back dependent chunks", async () => {
+    // Repeat across fresh sessions so the regression remains reliable without
+    // adding a long-running stress test to every integration-suite run.
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+      const name = `queue-dependent-chain-${iteration}.qmd`;
+      await writeFixture(
+        name,
+        [
+          `# Dependent queue chain ${iteration}`,
+          "",
+          "```{r a}",
+          "queue_a <- 1",
+          "```",
+          "",
+          "```{r b}",
+          "queue_b <- queue_a",
+          "```",
+          "",
+          "```{r c}",
+          "queue_c <- queue_b",
+          "```",
+          "",
+          "```{r d}",
+          "queue_d <- queue_c",
+          "```",
+          "",
+          "```{r e}",
+          "queue_e <- queue_d",
+          "```",
+          "",
+          "```{r result}",
+          `cat("dependent-chain-${iteration}:", queue_e, "\\n")`,
+          "```",
+          ""
+        ].join("\n")
+      );
+
+      const editor = await openNotebookEditor(name);
+      const uri = editor.notebook.uri.toString();
+      const before = await extensionApi.getDocumentState(uri);
+      const chunkIds = before.snapshot?.chunkIds ?? [];
+      assert.equal(chunkIds.length, 6, `Expected six dependent chunk ids in iteration ${iteration}.`);
+
+      // Model rapid individual cell execution, not Run All's explicitly sequential
+      // loop: each request is issued 100ms after the previous request without waiting
+      // for the previous chunk to finish.
+      const runs: Thenable<unknown>[] = [];
+      for (const chunkId of chunkIds) {
+        runs.push(vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, chunkId));
+        await sleep(100);
+      }
+      await Promise.all(runs);
+
+      const state = await extensionApi.getDocumentState(uri);
+      assert.equal(
+        state.outputs.filter((record) => record.status === "success").length,
+        chunkIds.length,
+        `Every dependent chunk should execute in requested order in iteration ${iteration}. ${state.outputChannelText}`
+      );
+      assert.ok(state.outputChannelText.includes(`dependent-chain-${iteration}: 1`));
+      await closeAllEditors();
+    }
+  });
+
+  it("stops the whole run, interrupting the running chunk and cancelling the queued ones", async () => {
+    await writeFixture(
+      "queue-interrupt.qmd",
+      [
+        "# Queue interrupt",
+        "",
+        "```{r blocking}",
+        "Sys.sleep(30)",
+        "cat('blocking done\\n')",
+        "```",
+        "",
+        "```{r waiting}",
+        "cat('waiting done\\n')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    // Keep the interactive timeout out of the way: the chunk is meant to be
+    // stopped by the interrupt, not by the fallback.
+    await updateTestSetting("execution.interactiveFallbackTimeoutMs", 60000);
+
+    const editor = await openNotebookEditor("queue-interrupt.qmd");
+    const uri = editor.notebook.uri.toString();
+    const before = await extensionApi.getDocumentState(uri);
+    const [blockingId, waitingId] = before.snapshot?.chunkIds ?? [];
+    assert.ok(blockingId && waitingId, "Expected two chunk ids.");
+
+    const blockingRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, blockingId);
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === blockingId && record.status === "running")
+    );
+
+    const waitingRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, waitingId);
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === waitingId && record.status === "running")
+    );
+    // Give the queued chunk a moment to actually enter the session queue before
+    // interrupting, so the interrupt is guaranteed to catch it waiting.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    await vscode.commands.executeCommand("rmdNotebooks.interruptSession", uri);
+    await Promise.all([blockingRun, waitingRun]);
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) => {
+      const blocking = candidate.outputs.find((record) => record.chunkId === blockingId);
+      const waiting = candidate.outputs.find((record) => record.chunkId === waitingId);
+      return blocking?.status === "error" && waiting?.status === "cancelled";
+    });
+
+    const blocking = state.outputs.find((record) => record.chunkId === blockingId);
+    const waiting = state.outputs.find((record) => record.chunkId === waitingId);
+    assert.equal(blocking?.status, "error");
+    assert.equal(waiting?.status, "cancelled");
+    assert.ok(!state.outputChannelText.includes("blocking done"), "The interrupted chunk should not finish.");
+    assert.ok(!state.outputChannelText.includes("waiting done"), "The cancelled chunk should never run.");
+  });
+
+  it("stops a Run All in progress so the remaining chunks do not run", async () => {
+    await writeFixture(
+      "runall-stop.qmd",
+      [
+        "# Run all stop",
+        "",
+        "```{r warm}",
+        "1 + 1",
+        "```",
+        "",
+        "```{r slow}",
+        "Sys.sleep(10)",
+        "cat('runall-slow done\\n')",
+        "```",
+        "",
+        "```{r mid}",
+        "cat('runall-mid done\\n')",
+        "```",
+        "",
+        "```{r tail}",
+        "cat('runall-tail done\\n')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    await updateTestSetting("execution.interactiveFallbackTimeoutMs", 60000);
+
+    const editor = await openNotebookEditor("runall-stop.qmd");
+    const uri = editor.notebook.uri;
+    const before = await extensionApi.getDocumentState(uri.toString());
+    const [, slowId, midId, tailId] = before.snapshot?.chunkIds ?? [];
+    assert.ok(slowId && midId && tailId, "Expected four chunk ids.");
+
+    // Run every chunk. The warm-up chunk runs first (so the session is ready by the
+    // time the slow chunk starts), then the slow Sys.sleep(10) chunk runs while mid and
+    // tail wait their turn in the run loop.
+    const runAll = vscode.commands.executeCommand("rmdNotebooks.runAllChunks", uri.toString());
+    await waitForDocumentState(uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === slowId && record.status === "running")
+    );
+    await sleep(400);
+
+    // Stop All during a Run All must end the WHOLE run, not just interrupt the current
+    // cell and let the loop march on to the next one.
+    await vscode.commands.executeCommand("rmdNotebooks.interruptSession", uri.toString());
+    await runAll;
+
+    const state = await waitForDocumentState(
+      uri,
+      (candidate) => {
+        const slow = candidate.outputs.find((record) => record.chunkId === slowId);
+        return !!slow && slow.status !== "running";
+      },
+      15000
+    );
+
+    const slow = state.outputs.find((record) => record.chunkId === slowId);
+    assert.ok(slow && slow.status !== "success", `The interrupted chunk should not complete, got ${slow?.status}.`);
+    assert.ok(!state.outputChannelText.includes("runall-slow done"), "The interrupted chunk should not finish.");
+    assert.ok(!state.outputChannelText.includes("runall-mid done"), "Run All must not continue to the next chunk after Stop All.");
+    assert.ok(!state.outputChannelText.includes("runall-tail done"), "Run All must not continue to later chunks after Stop All.");
+  });
+
+  it("cancels only the targeted queued chunk and lets the others run", async () => {
+    await writeFixture(
+      "cancel-one.qmd",
+      [
+        "# Cancel one",
+        "",
+        "```{r runningchunk}",
+        "Sys.sleep(3)",
+        "cat('running done\\n')",
+        "```",
+        "",
+        "```{r cancelme}",
+        "cat('cancelme done\\n')",
+        "```",
+        "",
+        "```{r survivor}",
+        "cat('survivor done\\n')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    await updateTestSetting("execution.interactiveFallbackTimeoutMs", 60000);
+
+    const editor = await openNotebookEditor("cancel-one.qmd");
+    const uri = editor.notebook.uri;
+    const before = await extensionApi.getDocumentState(uri.toString());
+    const [runningId, cancelId, survivorId] = before.snapshot?.chunkIds ?? [];
+    assert.ok(runningId && cancelId && survivorId, "Expected three chunk ids.");
+
+    const cancelIndex = findCodeCellIndex(editor.notebook, "cancelme done");
+
+    // Queue all three: the first runs (~3s), the other two wait behind it.
+    const runningRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri.toString(), runningId);
+    await waitForDocumentState(uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === runningId && record.status === "running")
+    );
+    const cancelRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri.toString(), cancelId);
+    const survivorRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri.toString(), survivorId);
+    await waitForDocumentState(uri, (candidate) =>
+      [cancelId, survivorId].every((id) => candidate.outputs.some((record) => record.chunkId === id))
+    );
+    // Let the two trailing chunks settle into the session queue behind the running one.
+    await sleep(300);
+
+    // Stop just the middle chunk from its own cell, the way its stop button would.
+    editor.selection = singleCellRange(cancelIndex);
+    await vscode.commands.executeCommand("notebook.cell.cancelExecution");
+
+    await Promise.all([runningRun, cancelRun, survivorRun]);
+
+    const state = await waitForDocumentState(uri, (candidate) => {
+      const running = candidate.outputs.find((record) => record.chunkId === runningId);
+      const cancelled = candidate.outputs.find((record) => record.chunkId === cancelId);
+      const survivor = candidate.outputs.find((record) => record.chunkId === survivorId);
+      return running?.status === "success" && cancelled?.status === "cancelled" && survivor?.status === "success";
+    });
+
+    assert.equal(state.outputs.find((record) => record.chunkId === cancelId)?.status, "cancelled");
+    assert.equal(state.outputs.find((record) => record.chunkId === runningId)?.status, "success");
+    assert.equal(state.outputs.find((record) => record.chunkId === survivorId)?.status, "success");
+    assert.ok(state.outputChannelText.includes("running done"), "The running chunk should finish.");
+    assert.ok(state.outputChannelText.includes("survivor done"), "The chunk after the cancelled one should run.");
+    assert.ok(!state.outputChannelText.includes("cancelme done"), "The cancelled chunk should never run.");
+  });
+
+  it("interrupts only the running cell and lets the queue continue", async () => {
+    await writeFixture(
+      "cancel-running.qmd",
+      [
+        "# Cancel running",
+        "",
+        "```{r warmup}",
+        "1 + 1",
+        "```",
+        "",
+        "```{r runningchunk}",
+        "Sys.sleep(30)",
+        "cat('running-cell finished\\n')",
+        "```",
+        "",
+        "```{r nextchunk}",
+        "cat('after-interrupt ran\\n')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    await updateTestSetting("execution.interactiveFallbackTimeoutMs", 60000);
+
+    const editor = await openNotebookEditor("cancel-running.qmd");
+    const uri = editor.notebook.uri;
+    const before = await extensionApi.getDocumentState(uri.toString());
+    const [warmupId, runningId, nextId] = before.snapshot?.chunkIds ?? [];
+    assert.ok(warmupId && runningId && nextId, "Expected three chunk ids.");
+
+    const runningIndex = findCodeCellIndex(editor.notebook, "running-cell finished");
+
+    // Warm the session so the long chunk begins running within microseconds of being
+    // enqueued; otherwise it could still be queued when we cancel and get dropped
+    // (cancelled) instead of interrupted (error).
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri.toString(), warmupId);
+    await waitForDocumentState(uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === warmupId && record.status === "success")
+    );
+
+    // Start the long chunk, then queue another behind it.
+    const runningRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri.toString(), runningId);
+    await waitForDocumentState(uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === runningId && record.status === "running")
+    );
+    const nextRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri.toString(), nextId);
+    await waitForDocumentState(uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === nextId)
+    );
+    // Let the long chunk actually begin in R and the next one settle in the queue.
+    await sleep(400);
+
+    // Stop just the running cell from its own stop button: it should be interrupted
+    // while the queued chunk behind it keeps going.
+    editor.selection = singleCellRange(runningIndex);
+    await vscode.commands.executeCommand("notebook.cell.cancelExecution");
+
+    await Promise.all([runningRun, nextRun]);
+
+    const state = await waitForDocumentState(uri, (candidate) => {
+      const running = candidate.outputs.find((record) => record.chunkId === runningId);
+      const next = candidate.outputs.find((record) => record.chunkId === nextId);
+      return running?.status === "error" && next?.status === "success";
+    });
+
+    assert.equal(
+      state.outputs.find((record) => record.chunkId === runningId)?.status,
+      "error",
+      "The running cell should be interrupted."
+    );
+    assert.equal(
+      state.outputs.find((record) => record.chunkId === nextId)?.status,
+      "success",
+      "The queued cell should still run after the running one is interrupted."
+    );
+    assert.ok(!state.outputChannelText.includes("running-cell finished"), "The interrupted cell should not finish.");
+    assert.ok(state.outputChannelText.includes("after-interrupt ran"), "The queue should continue after the interrupt.");
+  });
+
+  it("times each queued chunk by its own run, not the time since the first one started", async () => {
+    await writeFixture(
+      "queue-timing.qmd",
+      [
+        "# Queue timing",
+        "",
+        "```{r firstsleep}",
+        "Sys.sleep(1)",
+        "```",
+        "",
+        "```{r secondsleep}",
+        "Sys.sleep(1)",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("queue-timing.qmd");
+    const uri = editor.notebook.uri.toString();
+    const before = await extensionApi.getDocumentState(uri);
+    const [firstId, secondId] = before.snapshot?.chunkIds ?? [];
+    assert.ok(firstId && secondId, "Expected two chunk ids.");
+
+    const firstIndex = findFirstCodeCellIndex(editor.notebook);
+    const secondIndex = findLastCodeCellIndex(editor.notebook);
+
+    // Queue both chunks back-to-back so the second waits behind the first, just like
+    // running two cells in quick succession.
+    const firstRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, firstId);
+    const secondRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, secondId);
+    await Promise.all([firstRun, secondRun]);
+
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.filter((record) => record.status === "success").length === 2
+    );
+
+    const firstTiming = await waitForCellTiming(editor.notebook.uri, firstIndex);
+    const secondTiming = await waitForCellTiming(editor.notebook.uri, secondIndex);
+
+    const firstDuration = firstTiming.endTime - firstTiming.startTime;
+    const secondDuration = secondTiming.endTime - secondTiming.startTime;
+
+    // Each cell should report roughly its own ~1s sleep. Before the fix the second
+    // cell's clock started when it was enqueued (alongside the first), so it reported
+    // ~2s (the elapsed time since the first chunk began) instead of its own ~1s.
+    assert.ok(
+      firstDuration < 1800,
+      `First chunk should report ~its own 1s run, got ${firstDuration}ms.`
+    );
+    assert.ok(
+      secondDuration < 1800,
+      `Second chunk should report ~its own 1s run, not the cumulative time, got ${secondDuration}ms.`
+    );
+    // The two chunks ran sequentially (the queued one only started once the running
+    // one finished), confirming the clock reflects the queue wait rather than the
+    // enqueue moment. Order-independent: the two un-awaited runs can enqueue in either
+    // order, so compare the later start against the earlier end rather than assuming
+    // which chunk ran first.
+    const laterStart = Math.max(firstTiming.startTime, secondTiming.startTime);
+    const earlierEnd = Math.min(firstTiming.endTime, secondTiming.endTime);
+    assert.ok(
+      laterStart >= earlierEnd - 250,
+      `The second chunk should start when the first finished (later start ${laterStart}, earlier end ${earlierEnd}).`
+    );
+  });
+
+  it("interrupts a running chunk even after an earlier interrupt in the same session", async () => {
+    await writeFixture(
+      "double-interrupt.qmd",
+      [
+        "# Double interrupt",
+        "",
+        "```{r warmup}",
+        "1 + 1",
+        "```",
+        "",
+        "```{r blockingone}",
+        "Sys.sleep(10)",
+        "```",
+        "",
+        "```{r blockingtwo}",
+        "Sys.sleep(10)",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    // Keep the interactive-fallback timeout out of the way so each chunk is stopped by
+    // the interrupt, not by the timeout.
+    await updateTestSetting("execution.interactiveFallbackTimeoutMs", 60000);
+
+    const editor = await openNotebookEditor("double-interrupt.qmd");
+    const uri = editor.notebook.uri;
+    const before = await extensionApi.getDocumentState(uri.toString());
+    const [warmupId, firstId, secondId] = before.snapshot?.chunkIds ?? [];
+    assert.ok(warmupId && firstId && secondId, "Expected three chunk ids.");
+
+    // Warm the session up first so a queued chunk begins running within microseconds
+    // of being enqueued, making the interrupt timing below deterministic.
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri.toString(), warmupId);
+    await waitForDocumentState(uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === warmupId && record.status === "success")
+    );
+
+    // Interrupt the first chunk while it runs.
+    await interruptRunningChunk(uri, firstId);
+
+    // Interrupt a second chunk in the SAME session: this is the regression. Before the
+    // fix the second SIGINT was skipped (child.killed stays true after the first kill,
+    // even though the session survives it), so the chunk ran to completion instead of
+    // stopping while the queued chunks still got cancelled.
+    await interruptRunningChunk(uri, secondId);
+  });
+
+  it("runs a queued chunk after the one ahead of it times out", async () => {
+    await writeFixture(
+      "queue-after-timeout.qmd",
+      [
+        "# Queue after timeout",
+        "",
+        "```{r slow}",
+        "x <- 42",
+        "Sys.sleep(2)",
+        "```",
+        "",
+        "```{r queued}",
+        "cat(sprintf('queued ran x=%s\\n', x))",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    // The chunk ahead hits the interactive-fallback timeout (reported as an error,
+    // not redirected to a terminal). The queued chunk must not stay wedged behind
+    // the abandoned execution: once the interrupted chunk emits RESULT_END the queue
+    // drains and the queued chunk runs in the same still-live session.
+    await updateTestSetting("execution.interactiveFallbackTimeoutMs", 1000);
+    await updateTestSetting("execution.interactiveFallbackBehavior", "error");
+
+    const editor = await openNotebookEditor("queue-after-timeout.qmd");
+    const uri = editor.notebook.uri.toString();
+    const before = await extensionApi.getDocumentState(uri);
+    const [slowId, queuedId] = before.snapshot?.chunkIds ?? [];
+    assert.ok(slowId && queuedId, "Expected two chunk ids.");
+
+    // Start the slow chunk, wait until it is actually executing, then queue the
+    // second one behind it before the timeout fires.
+    const slowRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, slowId);
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === slowId && record.status === "running")
+    );
+
+    const queuedRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, queuedId);
+    await Promise.all([slowRun, queuedRun]);
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) => {
+      const slow = candidate.outputs.find((record) => record.chunkId === slowId);
+      const queued = candidate.outputs.find((record) => record.chunkId === queuedId);
+      return slow?.status === "error" && queued?.status === "success";
+    });
+
+    const slow = state.outputs.find((record) => record.chunkId === slowId);
+    const queued = state.outputs.find((record) => record.chunkId === queuedId);
+    assert.equal(slow?.status, "error", "The chunk ahead should hit the inline timeout.");
+    assert.equal(queued?.status, "success", "The queued chunk should run after the timeout, not hang behind it.");
+    assert.ok(
+      state.outputChannelText.includes("queued ran x=42"),
+      "The queued chunk should execute in the same live session."
+    );
+  });
+
   it("handles readline() prompts inline with a text input", async () => {
     await writeFixture(
       "interactive-readline.qmd",
@@ -967,14 +1515,55 @@ async function waitForNotebookOutput(
   }, timeoutMs);
 }
 
+async function interruptRunningChunk(uri: vscode.Uri, chunkId: string): Promise<void> {
+  const run = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri.toString(), chunkId);
+  await waitForDocumentState(uri, (candidate) =>
+    candidate.outputs.some((record) => record.chunkId === chunkId && record.status === "running")
+  );
+  // The "running" status is set just before the chunk is handed to R, so give it a
+  // moment to actually begin executing; interrupting during that window would cancel
+  // it (as still-queued) instead of interrupting the running chunk.
+  await sleep(400);
+  await vscode.commands.executeCommand("rmdNotebooks.interruptSession", uri.toString());
+
+  // A working interrupt terminates the chunk (status "error") almost immediately.
+  // Bound the wait and accept any terminal status so a regression (the SIGINT is
+  // skipped and the chunk runs to completion -> "success") fails fast with a targeted
+  // assertion instead of via the 60s mocha timeout.
+  const state = await waitForDocumentState(
+    uri,
+    (candidate) => {
+      const record = candidate.outputs.find((entry) => entry.chunkId === chunkId);
+      return !!record && (record.status === "error" || record.status === "success" || record.status === "cancelled");
+    },
+    15000
+  );
+  const record = state.outputs.find((entry) => entry.chunkId === chunkId);
+  assert.equal(record?.status, "error", `Chunk ${chunkId} should be interrupted (status error), got ${record?.status}.`);
+  await run.then(undefined, () => undefined);
+}
+
+async function waitForCellTiming(
+  uri: vscode.Uri,
+  cellIndex: number,
+  timeoutMs = 30000
+): Promise<{ startTime: number; endTime: number }> {
+  return waitFor(() => {
+    const notebook = vscode.workspace.notebookDocuments.find((candidate) => candidate.uri.toString() === uri.toString());
+    const timing = notebook?.cellAt(cellIndex).executionSummary?.timing;
+    return timing && timing.endTime >= timing.startTime ? timing : undefined;
+  }, timeoutMs);
+}
+
 async function waitForDocumentState(
   uri: vscode.Uri,
-  predicate: (state: Awaited<ReturnType<InlineChunksExtensionApi["getDocumentState"]>>) => boolean
+  predicate: (state: Awaited<ReturnType<InlineChunksExtensionApi["getDocumentState"]>>) => boolean,
+  timeoutMs = 30000
 ): Promise<Awaited<ReturnType<InlineChunksExtensionApi["getDocumentState"]>>> {
   return waitFor(async () => {
     const state = await extensionApi.getDocumentState(uri.toString());
     return predicate(state) ? state : undefined;
-  });
+  }, timeoutMs);
 }
 
 async function waitFor<T>(producer: () => Promise<T | undefined> | T | undefined, timeoutMs = 30000): Promise<T> {
