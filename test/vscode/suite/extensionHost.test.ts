@@ -567,6 +567,98 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(renderedCell.outputs.some((output) => output.items.some((item) => item.mime === "application/vnd.code.notebook.stderr")));
   });
 
+  it("counts executions per notebook, not across notebooks", async () => {
+    await writeFixture(
+      "exec-count-a.qmd",
+      [
+        "# Count A",
+        "",
+        "```{r a_one}",
+        "1 + 1",
+        "```",
+        "",
+        "```{r a_two}",
+        "2 + 2",
+        "```",
+        ""
+      ].join("\n")
+    );
+    await writeFixture(
+      "exec-count-b.qmd",
+      [
+        "# Count B",
+        "",
+        "```{r b_one}",
+        "3 + 3",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editorA = await openNotebookEditor("exec-count-a.qmd");
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    await waitForDocumentState(editorA.notebook.uri, (candidate) =>
+      candidate.outputs.filter((record) => record.status === "success").length === 2
+    );
+    assert.equal(await waitForExecutionOrder(editorA.notebook.uri, findFirstCodeCellIndex(editorA.notebook)), 1);
+    assert.equal(await waitForExecutionOrder(editorA.notebook.uri, findLastCodeCellIndex(editorA.notebook)), 2);
+
+    const editorB = await openNotebookEditor("exec-count-b.qmd");
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    await waitForDocumentState(editorB.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success")
+    );
+
+    // The bug this guards against: a single global counter kept climbing across
+    // notebooks, so B's first cell showed [3] (continuing from A's two runs). Each
+    // notebook has its own R session, so its count must start at [1].
+    const firstB = await waitForExecutionOrder(editorB.notebook.uri, findFirstCodeCellIndex(editorB.notebook));
+    assert.equal(firstB, 1, `Notebook B's first run should be [1], not a continuation of notebook A; got [${firstB}].`);
+  });
+
+  it("resets the execution count when the R session restarts", async () => {
+    await writeFixture(
+      "exec-count-reset.qmd",
+      [
+        "# Count reset",
+        "",
+        "```{r one}",
+        "1 + 1",
+        "```",
+        "",
+        "```{r two}",
+        "2 + 2",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("exec-count-reset.qmd");
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.filter((record) => record.status === "success").length === 2
+    );
+    const lastCellIndex = findLastCodeCellIndex(editor.notebook);
+    assert.equal(await waitForExecutionOrder(editor.notebook.uri, findFirstCodeCellIndex(editor.notebook)), 1);
+    assert.equal(await waitForExecutionOrder(editor.notebook.uri, lastCellIndex), 2);
+
+    await vscode.commands.executeCommand("rmdNotebooks.restartSession");
+
+    // Re-run only the last cell. The counter lives on the R session, so a restart
+    // makes a fresh session that starts over: this run is [1], not [3]. Wait past the
+    // stale [2] still showing from before the restart so the assertion is meaningful.
+    editor.selection = singleCellRange(lastCellIndex);
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    const resetOrder = await waitFor(() => {
+      const notebook = vscode.workspace.notebookDocuments.find(
+        (candidate) => candidate.uri.toString() === editor.notebook.uri.toString()
+      );
+      const order = notebook?.cellAt(lastCellIndex).executionSummary?.executionOrder;
+      return order === undefined || order === 2 ? undefined : order;
+    }, 15000);
+    assert.equal(resetOrder, 1, `Expected the execution count to reset to [1] after a restart, got [${resetOrder}].`);
+  });
+
   it("falls back to an R terminal when inline execution times out", async () => {
     await writeFixture(
       "interactive-timeout.qmd",
@@ -1541,6 +1633,17 @@ async function interruptRunningChunk(uri: vscode.Uri, chunkId: string): Promise<
   const record = state.outputs.find((entry) => entry.chunkId === chunkId);
   assert.equal(record?.status, "error", `Chunk ${chunkId} should be interrupted (status error), got ${record?.status}.`);
   await run.then(undefined, () => undefined);
+}
+
+async function waitForExecutionOrder(
+  uri: vscode.Uri,
+  cellIndex: number,
+  timeoutMs = 30000
+): Promise<number> {
+  return waitFor(() => {
+    const notebook = vscode.workspace.notebookDocuments.find((candidate) => candidate.uri.toString() === uri.toString());
+    return notebook?.cellAt(cellIndex).executionSummary?.executionOrder;
+  }, timeoutMs);
 }
 
 async function waitForCellTiming(
