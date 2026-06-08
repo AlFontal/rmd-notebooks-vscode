@@ -150,7 +150,7 @@
         },
         "rmdNotebooks.r.startupTimeoutMs": {
           "type": "number",
-          "default": 10000,
+          "default": 30000,
           "minimum": 1000,
           "description": "How long to wait (in milliseconds) for an inline R session to finish starting before reporting a startup timeout. Increase this for projects with slow R startup, e.g. renv autoloading, a heavy .Rprofile, or Bioconductor."
         },

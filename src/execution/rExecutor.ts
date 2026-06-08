@@ -136,7 +136,7 @@ export class RExecutor implements Executor {
     const rPath = configuration.get<string>("r.path", "R");
     const rArgs = getInlineRArgs(configuration);
     const sourceVscodeRSessionWatcher = configuration.get<boolean>("r.sourceVscodeRSessionWatcher", true);
-    const startupTimeoutMs = configuration.get<number>("r.startupTimeoutMs", 10000);
+    const startupTimeoutMs = configuration.get<number>("r.startupTimeoutMs", 30000);
     const sessionScriptPath = path.join(this.extensionUri.fsPath, "media", "r", "rmd_notebooks_session.R");
     const created = new RSession(rPath, rArgs, sessionScriptPath, workspaceFolder, sourceVscodeRSessionWatcher, startupTimeoutMs);
     this.sessions.set(documentUri, created);
@@ -177,7 +177,7 @@ class RSession {
     scriptPath: string,
     startupDirectory?: string,
     sourceVscodeRSessionWatcher = true,
-    startupTimeoutMs = 10000
+    startupTimeoutMs = 30000
   ) {
     this.process = spawn(rPath, rArgs, {
       stdio: "pipe",
@@ -198,7 +198,7 @@ class RSession {
     });
 
     this.startTimer = setTimeout(() => {
-      this.readyReject(new Error(`Timed out starting R session. ${this.startupErrors.join("\n")}`.trim()));
+      this.readyReject(new Error(`Timed out starting R session after ${startupTimeoutMs}ms. Increase rmdNotebooks.r.startupTimeoutMs if this project has a slow R startup. ${this.startupErrors.join("\n")}`.trim()));
     }, startupTimeoutMs);
 
     this.lineReader.on("line", (line) => this.handleStdoutLine(line));
