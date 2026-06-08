@@ -93,6 +93,10 @@ function getStateLabel(record: ChunkOutputRecord): string | undefined {
     return "[redirected]";
   }
 
+  if (record.status === "cancelled") {
+    return "[cancelled]";
+  }
+
   if (record.stale) {
     return "[stale]";
   }

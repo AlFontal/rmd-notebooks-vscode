@@ -67,6 +67,12 @@
         "title": "Rmd Notebooks: Run All Chunks"
       },
       {
+        "command": "rmdNotebooks.interruptSession",
+        "title": "Stop All Running Chunks",
+        "category": "Rmd Notebooks",
+        "icon": "$(stop-circle)"
+      },
+      {
         "command": "rmdNotebooks.clearCurrentOutput",
         "title": "Rmd Notebooks: Clear Current Output"
       },
@@ -103,6 +109,11 @@
     ],
     "menus": {
       "notebook/toolbar": [
+        {
+          "command": "rmdNotebooks.interruptSession",
+          "when": "notebookType == rmd-notebooks-vscode-notebook",
+          "group": "navigation@97"
+        },
         {
           "command": "rmdNotebooks.restartSession",
           "when": "notebookType == rmd-notebooks-vscode-notebook",

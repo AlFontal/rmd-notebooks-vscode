@@ -11,7 +11,7 @@ import {
   InteractivePromptResponse,
   PlotRenderOptions
 } from "../execution/executorTypes";
-import { InteractiveExecutionError } from "../execution/executionErrors";
+import { CancelledExecutionError, InteractiveExecutionError } from "../execution/executionErrors";
 import { RTerminalRunner } from "../execution/rTerminalRunner";
 import { OutputStore } from "../persistence/outputStore";
 import {
@@ -45,6 +45,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly metadataSyncInFlight = new Set<string>();
   private readonly outputSyncInFlight = new Set<string>();
+  private readonly executionAdmissions = new Map<string, Promise<void>>();
+  // Notebooks whose in-flight Run All / multi-cell run should stop before the next
+  // cell. Set by interruptSession ("Stop All"), checked between cells in the run loops.
+  private readonly runsToAbort = new Set<string>();
   private testPromptResponses: InteractivePromptResponse[] = [];
   private readonly testPromptRequests: InteractivePromptRequest[] = [];
   private executionOrder = 0;
@@ -64,14 +68,20 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     this.controller.supportedLanguages = ["r"];
     this.controller.supportsExecutionOrder = true;
     this.controller.executeHandler = async (cells, notebook) => {
+      const documentUri = notebook.uri.toString();
+      this.runsToAbort.delete(documentUri);
       for (const cell of cells) {
+        if (this.runsToAbort.has(documentUri)) {
+          break;
+        }
         await this.executeCell(notebook, cell);
       }
+      this.runsToAbort.delete(documentUri);
     };
-    this.controller.interruptHandler = async (notebook) => {
-      const executor = this.executorRegistry.get("r");
-      await executor?.interruptSession?.(notebook.uri.toString());
-    };
+    // No interruptHandler on purpose: with one, VS Code never fires per-cell
+    // cancellation tokens (it would interrupt the whole session instead). Relying on
+    // the tokens lets stopping one cell cancel just that cell, while leaving the
+    // others running or queued. "Stop All" is offered separately via interruptSession.
   }
 
   public async initialize(): Promise<void> {
@@ -108,13 +118,37 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return;
     }
 
+    const uri = notebook.uri.toString();
+    this.runsToAbort.delete(uri);
     const snapshot = await this.refreshNotebook(notebook);
     for (const entry of snapshot.chunks) {
+      if (this.runsToAbort.has(uri)) {
+        break;
+      }
       const outcome = await this.executeCell(notebook, entry.cell);
       if (outcome === "redirected") {
         break;
       }
     }
+    this.runsToAbort.delete(uri);
+  }
+
+  // Stops the whole run at once: interrupts the chunk currently running, cancels every
+  // chunk still queued, and breaks any in-flight Run All / multi-cell loop so the
+  // remaining cells never start. The notebook-wide counterpart to cancelling a single
+  // cell from its stop button.
+  public async interruptSession(documentUri?: string): Promise<void> {
+    const notebook = this.resolveNotebook(documentUri);
+    if (!notebook) {
+      return;
+    }
+
+    // A Run All / Run Selected loop executes cells one at a time, so only the running
+    // chunk is ever in the session queue; failQueue + SIGINT alone would stop that one
+    // cell and let the loop march on. This flag makes the loop bail out too.
+    this.runsToAbort.add(notebook.uri.toString());
+    const executor = this.executorRegistry.get("r");
+    await executor?.interruptSession?.(notebook.uri.toString());
   }
 
   public async clearCurrentOutput(documentUri?: string, chunkId?: string): Promise<void> {
@@ -316,6 +350,19 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return "completed";
     }
 
+    const releaseAdmission = await this.acquireExecutionAdmission(notebook.uri.toString());
+    try {
+      return await this.executeAdmittedCell(notebook, cell, releaseAdmission);
+    } finally {
+      releaseAdmission();
+    }
+  }
+
+  private async executeAdmittedCell(
+    notebook: vscode.NotebookDocument,
+    cell: vscode.NotebookCell,
+    releaseAdmission: () => void
+  ): Promise<ExecuteCellOutcome> {
     const snapshot = await this.refreshNotebook(notebook);
     const entry = snapshot.chunks.find((candidate) => candidate.index === cell.index);
     if (!entry) {
@@ -330,10 +377,26 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return "completed";
     }
     const execution = this.controller.createNotebookCellExecution(notebook.cellAt(entry.index));
-    execution.executionOrder = ++this.executionOrder;
-    execution.start(Date.now());
+    // Leave the cell in the "queued" (pending clock) state until the chunk actually
+    // begins running in R, instead of marking it running the moment it is enqueued.
+    // That way every cell's reported duration is its own run time, not the time since
+    // the first queued chunk started, and cells waiting their turn show the queued
+    // badge rather than a spinner, exactly like Run All. start() must precede end(),
+    // so paths that never reach R still call this before ending the execution.
+    let executionStarted = false;
+    const beginExecutionDisplay = (startTime?: number, assignOrder = true): void => {
+      if (executionStarted) {
+        return;
+      }
+      executionStarted = true;
+      if (assignOrder) {
+        execution.executionOrder = ++this.executionOrder;
+      }
+      execution.start(startTime);
+    };
 
     if (chunkOptions?.eval === false) {
+      beginExecutionDisplay(Date.now());
       const skippedRecord = createRecord(entry.chunk, "success", []);
       outputs.set(entry.chunk.identity.chunkId, skippedRecord);
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
@@ -346,6 +409,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
 
     if (!executor) {
+      beginExecutionDisplay(Date.now());
       const record = createRecord(entry.chunk, "error", [
         {
           type: "error",
@@ -368,7 +432,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     this.outputChannelController.logRunStarted(cell.document, entry.chunk);
 
     try {
-      const result = await executor.executeChunk({
+      const resultPromise = executor.executeChunk({
         documentUri: notebook.uri.toString(),
         workspaceFolder: vscode.workspace.getWorkspaceFolder(notebook.uri)?.uri.fsPath,
         chunkId: entry.chunk.identity.chunkId,
@@ -377,10 +441,20 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         header: entry.chunk.header,
         artifactDirectory: await this.outputStore.getArtifactDirectory(notebook.uri.toString()),
         plot: resolvePlotRenderOptions(chunkOptions),
-        prompt: (request) => this.promptForChunkInput(notebook, cell, entry.chunk, request)
+        prompt: (request) => this.promptForChunkInput(notebook, cell, entry.chunk, request),
+        onStart: () => beginExecutionDisplay(Date.now()),
+        token: execution.token
       });
+      releaseAdmission();
+      const result = await resultPromise;
 
       const filteredResult = applyChunkOptionsToResult(result, chunkOptions);
+      // onStart always fires (in the session's beginExecution) before any result can
+      // arrive, so the cell is already marked running here; this call is only a
+      // fallback for the impossible case where onStart was skipped, and is a no-op
+      // otherwise. The displayed start time therefore comes from onStart (Date.now at
+      // dequeue), not from filteredResult.startedAt.
+      beginExecutionDisplay(filteredResult.startedAt);
       const record = createRecordFromResult(entry.chunk, filteredResult);
       outputs.set(entry.chunk.identity.chunkId, record);
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
@@ -396,11 +470,32 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return "completed";
     } catch (error) {
       if (error instanceof InteractiveExecutionError) {
+        // The chunk did start running (it timed out mid-execution), so the cell is
+        // already showing as running by now; this only matters as a safeguard.
+        beginExecutionDisplay(Date.now());
         const fallback = await this.handleInteractiveFallback(notebook, cell, entry.chunk, outputs, execution, error.message);
         this.outputChannelController.logRunCompleted(cell.document, entry.chunk, fallback.record);
         return fallback.launchedTerminal ? "redirected" : "completed";
       }
 
+      if (error instanceof CancelledExecutionError) {
+        // The chunk was interrupted while still waiting in the queue, so it never
+        // ran. End the still-pending execution without assigning a run order or a
+        // duration (start() must be called before end(), but with no start time so
+        // no clock is shown), and clear it without flagging it as a failure.
+        beginExecutionDisplay(undefined, false);
+        const cancelledRecord = createRecord(entry.chunk, "cancelled", []);
+        outputs.set(entry.chunk.identity.chunkId, cancelledRecord);
+        await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
+        await this.withOutputSync(notebook.uri.toString(), async () => {
+          await execution.clearOutput();
+        });
+        execution.end(undefined, Date.now());
+        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, cancelledRecord);
+        return "completed";
+      }
+
+      beginExecutionDisplay(Date.now());
       const record = createRecord(entry.chunk, "error", [
         {
           type: "error",
@@ -416,6 +511,31 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
       return "completed";
     }
+  }
+
+  private async acquireExecutionAdmission(documentUri: string): Promise<() => void> {
+    // Preserve request order through asynchronous notebook preparation. The caller
+    // releases this gate as soon as the request reaches the executor's own queue.
+    const previous = this.executionAdmissions.get(documentUri) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => current);
+    this.executionAdmissions.set(documentUri, tail);
+
+    await previous;
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      release();
+      if (this.executionAdmissions.get(documentUri) === tail) {
+        this.executionAdmissions.delete(documentUri);
+      }
+    };
   }
 
   public async runCurrentChunkInTerminal(documentUri?: string, chunkId?: string): Promise<void> {
@@ -598,6 +718,14 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   }
 
   private resolveNotebook(documentUri?: string): vscode.NotebookDocument | undefined {
+    // Toolbar/menu commands are invoked with a context object (e.g. { notebookEditor })
+    // rather than a string URI, so a non-string argument means "no URI given": fall
+    // back to the active/visible notebook instead of comparing a string against an
+    // object (which never matches and would silently resolve nothing).
+    if (typeof documentUri !== "string") {
+      documentUri = undefined;
+    }
+
     if (!documentUri) {
       return (
         vscode.window.activeNotebookEditor?.notebook ??
