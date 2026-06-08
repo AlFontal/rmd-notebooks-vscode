@@ -51,7 +51,6 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private readonly runsToAbort = new Set<string>();
   private testPromptResponses: InteractivePromptResponse[] = [];
   private readonly testPromptRequests: InteractivePromptRequest[] = [];
-  private executionOrder = 0;
   private readonly controller: vscode.NotebookController;
 
   public constructor(
@@ -384,13 +383,17 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     // badge rather than a spinner, exactly like Run All. start() must precede end(),
     // so paths that never reach R still call this before ending the execution.
     let executionStarted = false;
-    const beginExecutionDisplay = (startTime?: number, assignOrder = true): void => {
+    // The execution order (the [N] badge) is the R session's own per-notebook count,
+    // delivered through onStart when the chunk actually starts running in R. Chunks
+    // that never reach R (eval=FALSE, no executor) leave it undefined and so show no
+    // number, the way a chunk that did not run has no count.
+    const beginExecutionDisplay = (startTime?: number, executionOrder?: number): void => {
       if (executionStarted) {
         return;
       }
       executionStarted = true;
-      if (assignOrder) {
-        execution.executionOrder = ++this.executionOrder;
+      if (executionOrder !== undefined) {
+        execution.executionOrder = executionOrder;
       }
       execution.start(startTime);
     };
@@ -442,7 +445,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         artifactDirectory: await this.outputStore.getArtifactDirectory(notebook.uri.toString()),
         plot: resolvePlotRenderOptions(chunkOptions),
         prompt: (request) => this.promptForChunkInput(notebook, cell, entry.chunk, request),
-        onStart: () => beginExecutionDisplay(Date.now()),
+        onStart: (executionOrder) => beginExecutionDisplay(Date.now(), executionOrder),
         token: execution.token
       });
       releaseAdmission();
@@ -483,7 +486,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         // ran. End the still-pending execution without assigning a run order or a
         // duration (start() must be called before end(), but with no start time so
         // no clock is shown), and clear it without flagging it as a failure.
-        beginExecutionDisplay(undefined, false);
+        beginExecutionDisplay(undefined);
         const cancelledRecord = createRecord(entry.chunk, "cancelled", []);
         outputs.set(entry.chunk.identity.chunkId, cancelledRecord);
         await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);

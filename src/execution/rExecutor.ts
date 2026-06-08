@@ -55,7 +55,7 @@ interface ExecutionRequest {
   dataFrame?: DataFrameRenderOptions;
   timeoutMs: number;
   promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>;
-  onStart?: () => void;
+  onStart?: (executionOrder: number) => void;
 }
 
 interface QueuedExecution {
@@ -207,6 +207,11 @@ class RSession {
   private sessionReady = false;
   private alive = true;
   private runtimeStderr = "";
+  // Per-session execution counter, mirroring a Jupyter kernel's execution_count: it
+  // counts the chunks this session has actually run, so it is scoped to the notebook
+  // (one session per document) and starts over at 1 whenever the session restarts,
+  // since a restart builds a brand-new RSession.
+  private executionCount = 0;
 
   public constructor(
     rPath: string,
@@ -297,7 +302,7 @@ class RSession {
     dataFrame?: DataFrameRenderOptions,
     timeoutMs = 15000,
     promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>,
-    onStart?: () => void,
+    onStart?: (executionOrder: number) => void,
     token?: ExecutionCancellationToken
   ): Promise<RawExecutionPayload> {
     // Chunks are queued instead of rejected: a chunk requested while another is
@@ -399,8 +404,11 @@ class RSession {
     this.executionTimeoutMs = request.timeoutMs;
     this.runtimeStderr = "";
     // The chunk is leaving the queue now, so let the caller mark the cell as
-    // running (rather than queued) starting from this moment.
-    request.onStart?.();
+    // running (rather than queued) starting from this moment, tagged with this run's
+    // place in the session's execution count (the [N] badge). Only chunks that reach
+    // R increment it, so it advances in the order chunks actually execute.
+    this.executionCount += 1;
+    request.onStart?.(this.executionCount);
     this.armExecutionTimeout();
     this.process.stdin.write(`${COMMAND_MARKER}\n`);
     this.process.stdin.write(`WORKDIR:${encodeProtocolLine(request.workingDirectory ?? "")}\n`);
