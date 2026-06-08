@@ -4,3 +4,10 @@ export class InteractiveExecutionError extends Error {
     this.name = "InteractiveExecutionError";
   }
 }
+
+export class CancelledExecutionError extends Error {
+  public constructor(message = "Execution cancelled before it started.") {
+    super(message);
+    this.name = "CancelledExecutionError";
+  }
+}

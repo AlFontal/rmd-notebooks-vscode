@@ -80,7 +80,7 @@ export type OutputItem =
   | ImageOutputItem
   | HtmlOutputItem;
 
-export type ChunkOutputStatus = "running" | "success" | "error" | "redirected";
+export type ChunkOutputStatus = "running" | "success" | "error" | "redirected" | "cancelled";
 
 export interface ChunkOutputRecord {
   documentUri: string;

@@ -5,13 +5,14 @@ import * as vscode from "vscode";
 import { ErrorOutputItem, HtmlOutputItem, ImageOutputItem, OutputItem, TextOutputItem } from "../document/chunkTypes";
 import {
   Executor,
+  ExecutionCancellationToken,
   ExecutionContext,
   ExecutionResult,
   InteractivePromptChoice,
   InteractivePromptRequest,
   InteractivePromptResponse
 } from "./executorTypes";
-import { InteractiveExecutionError } from "./executionErrors";
+import { CancelledExecutionError, InteractiveExecutionError } from "./executionErrors";
 import { getInlineRArgs } from "./rStartupArgs";
 
 const READY_MARKER = "RMD_NOTEBOOKS_READY";
@@ -40,6 +41,22 @@ interface PendingExecution {
   abandoned: boolean;
 }
 
+interface ExecutionRequest {
+  code: string;
+  workingDirectory?: string;
+  artifactDirectory?: string;
+  plot?: ExecutionContext["plot"];
+  timeoutMs: number;
+  promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>;
+  onStart?: () => void;
+}
+
+interface QueuedExecution {
+  readonly request: ExecutionRequest;
+  resolve: (payload: RawExecutionPayload) => void;
+  reject: (error: Error) => void;
+}
+
 export class RExecutor implements Executor {
   public readonly language = "r";
   private readonly sessions = new Map<string, RSession>();
@@ -65,7 +82,9 @@ export class RExecutor implements Executor {
       context.artifactDirectory,
       context.plot,
       timeoutMs,
-      context.prompt
+      context.prompt,
+      context.onStart,
+      context.token
     );
 
     const items: OutputItem[] = [];
@@ -119,7 +138,7 @@ export class RExecutor implements Executor {
 
   public async interruptSession(documentUri: string): Promise<void> {
     const session = this.sessions.get(documentUri);
-    await session?.interrupt();
+    session?.interrupt();
   }
 
   public async disposeAll(): Promise<void> {
@@ -159,6 +178,9 @@ class RSession {
   private readyResolve!: () => void;
   private readyReject!: (error: Error) => void;
   private pending: PendingExecution | undefined;
+  private pendingTask: QueuedExecution | undefined;
+  private readonly queue: QueuedExecution[] = [];
+  private starting = false;
   private currentLines: string[] = [];
   private currentPromptLines: string[] = [];
   private waitingForResult = false;
@@ -169,6 +191,7 @@ class RSession {
   private executionTimeout: NodeJS.Timeout | undefined;
   private executionTimeoutMs = 0;
   private sessionReady = false;
+  private alive = true;
   private runtimeStderr = "";
 
   public constructor(
@@ -219,23 +242,29 @@ class RSession {
       }
     });
     this.process.on("error", (error) => {
+      this.alive = false;
       this.readyReject(error);
       if (this.pending) {
         this.clearExecutionTimeout();
         this.promptHandler = undefined;
         this.pending.reject(error);
         this.pending = undefined;
+        this.pendingTask = undefined;
       }
+      this.failQueue(error);
     });
     this.process.on("exit", (code, signal) => {
+      this.alive = false;
       const message = `R session exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"}).`;
       if (this.pending) {
         this.clearExecutionTimeout();
         this.promptHandler = undefined;
         this.pending.reject(new Error(message));
         this.pending = undefined;
+        this.pendingTask = undefined;
       }
       this.readyReject(new Error(message));
+      this.failQueue(new Error(message));
     });
 
     // Start an interactive R session, then source the command loop script over stdin.
@@ -246,61 +275,148 @@ class RSession {
     await this.readyPromise;
   }
 
-  public async execute(
+  public execute(
     code: string,
     workingDirectory?: string,
     artifactDirectory?: string,
     plot?: ExecutionContext["plot"],
     timeoutMs = 15000,
-    promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>
+    promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>,
+    onStart?: () => void,
+    token?: ExecutionCancellationToken
   ): Promise<RawExecutionPayload> {
-    await this.ready();
-    if (this.pending) {
-      throw new Error("R session is already executing a chunk.");
-    }
-
+    // Chunks are queued instead of rejected: a chunk requested while another is
+    // running waits its turn and runs in order, like cells in a Jupyter notebook.
     return new Promise<RawExecutionPayload>((resolve, reject) => {
-      this.pending = {
-        abandoned: false,
-        resolve: (payload) => {
-          this.clearExecutionTimeout();
-          this.promptHandler = undefined;
-          resolve(payload);
-        },
-        reject: (error) => {
-          this.clearExecutionTimeout();
-          this.promptHandler = undefined;
-          reject(error);
-        }
+      const task: QueuedExecution = {
+        request: { code, workingDirectory, artifactDirectory, plot, timeoutMs, promptHandler, onStart },
+        resolve,
+        reject
       };
-      this.promptHandler = promptHandler;
-      this.executionTimeoutMs = timeoutMs;
-      this.runtimeStderr = "";
-      this.armExecutionTimeout();
-      this.process.stdin.write(`${COMMAND_MARKER}\n`);
-      this.process.stdin.write(`WORKDIR:${encodeProtocolLine(workingDirectory ?? "")}\n`);
-      this.process.stdin.write(`ARTIFACT_DIR:${encodeProtocolLine(artifactDirectory ?? "")}\n`);
-      this.process.stdin.write(`PLOT_WIDTH:${plot?.widthInches ?? ""}\n`);
-      this.process.stdin.write(`PLOT_HEIGHT:${plot?.heightInches ?? ""}\n`);
-      this.process.stdin.write(`PLOT_DPI:${plot?.dpi ?? ""}\n`);
-      const codeLines = toProtocolLines(code);
-      this.process.stdin.write(`CODE_COUNT:${codeLines.length}\n`);
-      for (const line of codeLines) {
-        this.process.stdin.write(`LINE:${encodeProtocolLine(line)}\n`);
+      this.queue.push(task);
+      // Cancelling one cell affects only that cell: if it is still queued it is
+      // dropped; if it is the one running it is interrupted. The rest keep going.
+      if (token) {
+        if (token.isCancellationRequested) {
+          this.cancelTask(task);
+        } else {
+          token.onCancellationRequested(() => this.cancelTask(task));
+        }
       }
-      this.process.stdin.write(`${COMMAND_END_MARKER}\n`);
+      this.drainQueue();
     });
   }
 
-  public async interrupt(): Promise<void> {
-    if (!this.pending || this.pending.abandoned) {
+  // Cancels a single chunk without disturbing the others.
+  private cancelTask(task: QueuedExecution): void {
+    const queueIndex = this.queue.indexOf(task);
+    if (queueIndex >= 0) {
+      this.queue.splice(queueIndex, 1);
+      task.reject(new CancelledExecutionError());
       return;
     }
 
-    this.interruptProcess();
+    // Not queued anymore: only interrupt if it is the chunk currently running.
+    if (this.pendingTask === task && this.pending && !this.pending.abandoned) {
+      this.interruptProcess();
+    }
+  }
+
+  public interrupt(): void {
+    // A single interrupt stops the whole run: drop everything still queued, then
+    // interrupt the chunk currently executing (if any). A chunk already abandoned
+    // by an execution timeout was interrupted there, so it is left alone.
+    this.failQueue(new CancelledExecutionError());
+    if (this.pending && !this.pending.abandoned) {
+      this.interruptProcess();
+    }
+  }
+
+  // Starts the next queued chunk once the session is idle. Only one chunk runs
+  // at a time; the rest wait their turn instead of erroring out.
+  private drainQueue(): void {
+    if (this.pending || this.starting || this.queue.length === 0) {
+      return;
+    }
+    if (!this.alive) {
+      this.failQueue(new Error("R session is no longer running."));
+      return;
+    }
+
+    this.starting = true;
+    this.ready().then(
+      () => {
+        this.starting = false;
+        if (!this.alive) {
+          this.failQueue(new Error("R session is no longer running."));
+          return;
+        }
+        // interrupt() can empty the queue while we awaited readiness.
+        const task = this.queue.shift();
+        if (task) {
+          this.beginExecution(task);
+        }
+      },
+      (error) => {
+        this.starting = false;
+        this.failQueue(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+  }
+
+  private beginExecution(task: QueuedExecution): void {
+    const { request } = task;
+    this.pendingTask = task;
+    this.pending = {
+      abandoned: false,
+      resolve: (payload) => {
+        this.clearExecutionTimeout();
+        this.promptHandler = undefined;
+        task.resolve(payload);
+      },
+      reject: (error) => {
+        this.clearExecutionTimeout();
+        this.promptHandler = undefined;
+        task.reject(error);
+      }
+    };
+    this.promptHandler = request.promptHandler;
+    this.executionTimeoutMs = request.timeoutMs;
+    this.runtimeStderr = "";
+    // The chunk is leaving the queue now, so let the caller mark the cell as
+    // running (rather than queued) starting from this moment.
+    request.onStart?.();
+    this.armExecutionTimeout();
+    this.process.stdin.write(`${COMMAND_MARKER}\n`);
+    this.process.stdin.write(`WORKDIR:${encodeProtocolLine(request.workingDirectory ?? "")}\n`);
+    this.process.stdin.write(`ARTIFACT_DIR:${encodeProtocolLine(request.artifactDirectory ?? "")}\n`);
+    this.process.stdin.write(`PLOT_WIDTH:${request.plot?.widthInches ?? ""}\n`);
+    this.process.stdin.write(`PLOT_HEIGHT:${request.plot?.heightInches ?? ""}\n`);
+    this.process.stdin.write(`PLOT_DPI:${request.plot?.dpi ?? ""}\n`);
+    const codeLines = toProtocolLines(request.code);
+    this.process.stdin.write(`CODE_COUNT:${codeLines.length}\n`);
+    for (const line of codeLines) {
+      this.process.stdin.write(`LINE:${encodeProtocolLine(line)}\n`);
+    }
+    this.process.stdin.write(`${COMMAND_END_MARKER}\n`);
+  }
+
+  private failQueue(error: Error): void {
+    const queued = this.queue.splice(0, this.queue.length);
+    for (const task of queued) {
+      task.reject(error);
+    }
   }
 
   public async dispose(): Promise<void> {
+    this.alive = false;
+    // Only a session that actually started gets its queued chunks cancelled here.
+    // A session disposed because startup failed (e.g. the eviction in
+    // getOrCreateSession) must let drainQueue reject the queue with the real
+    // startup error instead of masking it with a cancellation.
+    if (this.sessionReady) {
+      this.failQueue(new CancelledExecutionError("R session was disposed."));
+    }
     this.lineReader.close();
     this.process.stdin.end();
     this.process.kill();
@@ -339,6 +455,7 @@ class RSession {
       this.waitingForResult = false;
       const pending = this.pending;
       this.pending = undefined;
+      this.pendingTask = undefined;
 
       try {
         if (!pending || pending.abandoned) {
@@ -355,6 +472,8 @@ class RSession {
       } finally {
         this.currentLines = [];
         this.runtimeStderr = "";
+        // The slot is free again: kick off the next queued chunk, if any.
+        this.drainQueue();
       }
 
       return;
@@ -407,7 +526,12 @@ class RSession {
   }
 
   private interruptProcess(): void {
-    if (this.process.killed) {
+    // Guard on whether the process is still running, not on process.killed:
+    // child.killed flips to true after the first kill() and stays true even though
+    // the R session survives a SIGINT (it catches the interrupt). Keying off it would
+    // make every interrupt after the first one a no-op, so the currently running chunk
+    // could never be stopped again.
+    if (!this.alive) {
       return;
     }
 

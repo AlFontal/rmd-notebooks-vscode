@@ -29,6 +29,13 @@ export interface InteractivePromptResponse {
   value?: string;
 }
 
+// Structural subset of vscode.CancellationToken so executor types stay free of a
+// direct vscode dependency. A vscode.CancellationToken is assignable to this.
+export interface ExecutionCancellationToken {
+  readonly isCancellationRequested: boolean;
+  onCancellationRequested(listener: () => void): unknown;
+}
+
 export interface ExecutionContext {
   documentUri: string;
   workspaceFolder?: string;
@@ -39,6 +46,12 @@ export interface ExecutionContext {
   artifactDirectory?: string;
   plot?: PlotRenderOptions;
   prompt?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>;
+  // Invoked when the chunk leaves the queue and actually begins running in the R
+  // session, so the caller can flip the cell from "queued" to "running" only then.
+  onStart?: () => void;
+  // Cancels just this chunk: if it is still queued it is dropped from the queue; if
+  // it is the one currently running it is interrupted. Other chunks are unaffected.
+  token?: ExecutionCancellationToken;
 }
 
 export interface ExecutionResult {

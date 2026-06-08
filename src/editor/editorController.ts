@@ -5,6 +5,7 @@ import { ChunkDocumentSnapshot, ChunkOutputRecord, ExecutableChunk } from "../do
 import { OutputDecorationController } from "./outputDecorationController";
 import { ExecutorRegistry } from "../execution/executorRegistry";
 import { ExecutionResult } from "../execution/executorTypes";
+import { CancelledExecutionError } from "../execution/executionErrors";
 import { OutputStore } from "../persistence/outputStore";
 import { isSupportedDocument } from "../util/documentMatchers";
 import { ChunkCodeLensProvider } from "./chunkCodeLensProvider";
@@ -200,16 +201,14 @@ export class EditorController implements vscode.Disposable {
       outputs.set(chunk.identity.chunkId, record);
       this.outputChannelController.logRunCompleted(document, chunk, record);
     } catch (error) {
-      const record = createRecord(
-        chunk,
-        "error",
-        [
-          {
-            type: "error",
-            text: error instanceof Error ? error.message : String(error)
-          }
-        ]
-      );
+      const record = error instanceof CancelledExecutionError
+        ? createRecord(chunk, "cancelled", [])
+        : createRecord(chunk, "error", [
+            {
+              type: "error",
+              text: error instanceof Error ? error.message : String(error)
+            }
+          ]);
       outputs.set(
         chunk.identity.chunkId,
         record
