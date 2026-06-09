@@ -5,7 +5,6 @@
 # Rmd Notebooks for VS Code
 
 <p align="center">
-  <img alt="Preview" src="https://img.shields.io/badge/status-preview-E67E22" />
   <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/AlFontal/rmd-notebooks-vscode/ci.yml?branch=main&label=ci" />
   <a href="https://marketplace.visualstudio.com/items?itemName=AlFontal.rmd-notebooks-vscode"><img alt="Install for VS Code" src="https://img.shields.io/badge/install-for%20VS%20Code-007ACC?logo=visualstudiocode&logoColor=white" /></a>
   <a href="https://open-vsx.org/extension/AlFontal/rmd-notebooks-vscode"><img alt="Install for Positron" src="https://img.shields.io/badge/install-for%20Positron-447099" /></a>
@@ -13,7 +12,7 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-2E8B57" />
 </p>
 
-Run `.Rmd` and `.qmd` files as source-preserving notebooks in VS Code, with inline R execution, persisted outputs, plots, and vscode-R workspace integration.
+Run `.Rmd` and `.qmd` files as source-preserving notebooks in VS Code, with inline R execution, persisted outputs, plots, data-frame tables, and vscode-R workspace integration.
 
 Rmd Notebooks opens R Markdown and Quarto documents as runnable notebooks without converting the file on disk. Code cells come from fenced chunks, outputs render inline, and the original source remains available whenever you want to inspect or edit it directly.
 
@@ -38,12 +37,14 @@ The vscode-R dependency is used for normal R tooling integration, including the 
 ## What It Does
 
 - Opens `.Rmd`, `.rmd`, and `.qmd` files as notebooks
-- Runs R chunks in a persistent per-document R session
+- Runs R chunks in a persistent per-document R session, queueing rapid requests in execution order
 - Evaluates inline chunks in `.GlobalEnv`, so user variables are normal R workspace variables
 - Honors normal R startup files by default, including project `.Rprofile` files used by tools such as `renv`
-- Shows inline stdout, stderr, HTML snippets, and static PNG plots
+- Shows inline stdout, stderr, HTML snippets, static PNG plots, and theme-aware data-frame tables
+- Shows execution-order badges per notebook and resets them when its R session restarts
 - Persists outputs and restores them when the document is reopened
 - Marks outputs stale after code edits
+- Supports cancelling an individual running or queued cell, plus Stop All for the active notebook run
 - Supports notebook commands for run current chunk, run all chunks, restart session, clear outputs, and source view
 - Supports chunk-header editing from notebook mode
 - Handles common prompt-style interactions such as `menu()` and `readline()` with VS Code UI
@@ -85,6 +86,7 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 
 - `Rmd Notebooks: Run Current Chunk`
 - `Rmd Notebooks: Run All Chunks`
+- `Rmd Notebooks: Stop All Running Chunks`
 - `Rmd Notebooks: Clear Current Output`
 - `Rmd Notebooks: Clear All Outputs`
 - `Rmd Notebooks: Restart R Session`
@@ -93,7 +95,7 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 - `Rmd Notebooks: Edit Chunk Header`
 - `Rmd Notebooks: Toggle Notebook / Raw Source View`
 
-The notebook toolbar also exposes `Restart R Session` and `View Source`.
+The notebook toolbar also exposes `Stop All Running Chunks`, `Restart R Session`, and `View Source`.
 
 ## Settings
 
@@ -101,6 +103,7 @@ The notebook toolbar also exposes `Restart R Session` and `View Source`.
 - `rmdNotebooks.r.args`: arguments for inline chunk-execution R sessions. Defaults to `["--slave"]`.
 - `rmdNotebooks.r.terminalArgs`: arguments for the interactive R terminal. Defaults to `["--vanilla"]`.
 - `rmdNotebooks.r.sourceVscodeRSessionWatcher`: source `~/.vscode-R/init.R` in inline R sessions when present. Defaults to `true`.
+- `rmdNotebooks.r.startupTimeoutMs`: time allowed for an inline R session to start. Defaults to `30000` milliseconds.
 - `rmdNotebooks.execution.interactiveFallbackTimeoutMs`: timeout for treating a stalled inline chunk as unsupported interactive input. Defaults to `0`, which disables the timeout.
 - `rmdNotebooks.execution.interactiveFallbackBehavior`: what to do when the optional interactive fallback timeout fires. Defaults to `prompt`.
 - `rmdNotebooks.output.dataFrameRender`: render data frames as HTML tables instead of plain text. Defaults to `true`.

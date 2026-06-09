@@ -1,9 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+- queue inline R chunk requests in execution order, show waiting cells as pending, and support cancelling one cell without dropping the rest of the queue
+- add `Stop All Running Chunks` to interrupt the active chunk, cancel queued chunks, and stop an in-progress Run All
+- render auto-printed data frames, tibbles, and data tables as theme-aware HTML tables, with settings to disable tables or limit displayed rows and columns
+- scope execution-order badges to each notebook's R session and reset them when the session restarts (#15)
+- add `rmdNotebooks.r.startupTimeoutMs` with a 30-second default and actionable timeout errors for projects with slow R startup
+- retry with a fresh inline R session after startup failures instead of retaining the failed session
+- restore persisted outputs to the correct cells after reloading a window
+- keep outputs cleared with VS Code's notebook toolbar from reappearing when the notebook is reopened
+
+Thanks to @alpelito7 for the (many) contributions in this release!
+
 ## 0.3.0
 
-- Add `rmdNotebooks.r.startupTimeoutMs` to configure the inline R session startup budget (default 30000ms), for projects with slow R startup (renv, heavy `.Rprofile`, Bioconductor). The startup timeout error now reports the budget and names the setting to raise.
-- Fix: an inline session that fails to start is no longer cached, so re-running a chunk retries from scratch instead of repeating the startup error.
 - attach inline R sessions to vscode-R so variables can appear in the R workspace viewer
 - run inline chunks in `.GlobalEnv` and honor project `.Rprofile` startup by default
 - add vscode-R as an extension dependency
