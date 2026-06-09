@@ -331,6 +331,30 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return;
     }
 
+    const clearedCells = event.cellChanges
+      .filter((change) => change.outputs !== undefined && change.outputs.length === 0)
+      .map((change) => change.cell);
+    if (clearedCells.length > 0) {
+      let snapshot = this.snapshots.get(documentUri);
+      let outputs = this.outputsByDocument.get(documentUri);
+      if (!snapshot) {
+        snapshot = await this.refreshNotebook(notebook);
+      }
+      if (!outputs) {
+        outputs = await this.ensureOutputsLoaded(documentUri);
+      }
+      let changed = false;
+      for (const cell of clearedCells) {
+        const entry = snapshot.chunks.find((candidate) => candidate.index === cell.index);
+        if (entry) {
+          changed = outputs.delete(entry.chunk.identity.chunkId) || changed;
+        }
+      }
+      if (changed) {
+        await this.outputStore.saveDocumentOutputs(documentUri, outputs);
+      }
+    }
+
     await this.refreshNotebook(notebook);
   }
 

@@ -591,6 +591,46 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.equal(afterAllClear.outputs.length, 0);
   });
 
+  it("persists outputs cleared from the built-in notebook toolbar", async () => {
+    await writeFixture(
+      "clear-toolbar-output.qmd",
+      [
+        "# Clear toolbar output",
+        "",
+        "```{r first}",
+        "1 + 1",
+        "```",
+        "",
+        "```{r second}",
+        "2 + 2",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("clear-toolbar-output.qmd");
+    const uri = editor.notebook.uri;
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    await waitForDocumentState(uri, (candidate) => candidate.outputs.length === 2);
+
+    // This is VS Code's built-in toolbar action, not the extension command.
+    await vscode.commands.executeCommand("notebook.clearAllCellsOutputs");
+    await waitFor(() =>
+      editor.notebook.getCells().every((cell) => cell.outputs.length === 0) ? true : undefined
+    );
+
+    await closeAllEditors();
+    const reopened = await openNotebookEditor("clear-toolbar-output.qmd");
+    await sleep(300);
+
+    const state = await extensionApi.getDocumentState(uri.toString());
+    assert.equal(state.outputs.length, 0, "Cleared toolbar outputs should be removed from persisted extension state.");
+    assert.ok(
+      reopened.notebook.getCells().every((cell) => cell.outputs.length === 0),
+      "Cleared toolbar outputs should not reappear when the notebook is reopened."
+    );
+  });
+
   it("restarts the per-document R session", async () => {
     await writeFixture(
       "restart-session.qmd",
