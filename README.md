@@ -103,6 +103,9 @@ The notebook toolbar also exposes `Restart R Session` and `View Source`.
 - `rmdNotebooks.r.sourceVscodeRSessionWatcher`: source `~/.vscode-R/init.R` in inline R sessions when present. Defaults to `true`.
 - `rmdNotebooks.execution.interactiveFallbackTimeoutMs`: timeout for treating a stalled inline chunk as unsupported interactive input. Defaults to `0`, which disables the timeout.
 - `rmdNotebooks.execution.interactiveFallbackBehavior`: what to do when the optional interactive fallback timeout fires. Defaults to `prompt`.
+- `rmdNotebooks.output.dataFrameRender`: render data frames as HTML tables instead of plain text. Defaults to `true`.
+- `rmdNotebooks.output.dataFrameMaxRows`: row threshold before HTML tables collapse to their first and last rows. Defaults to `50`.
+- `rmdNotebooks.output.dataFrameMaxColumns`: column threshold before HTML tables collapse to their first and last columns. Defaults to `50`.
 
 Inline R sessions honor normal startup files by default. To isolate inline sessions from project startup files, add `--vanilla`:
 
