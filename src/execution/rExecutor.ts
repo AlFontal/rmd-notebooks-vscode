@@ -22,7 +22,7 @@ const PROMPT_START_MARKER = "RMD_NOTEBOOKS_PROMPT_START";
 const PROMPT_END_MARKER = "RMD_NOTEBOOKS_PROMPT_END";
 const PROMPT_RESPONSE_START_MARKER = "RMD_NOTEBOOKS_PROMPT_RESPONSE_START";
 const PROMPT_RESPONSE_END_MARKER = "RMD_NOTEBOOKS_PROMPT_RESPONSE_END";
-const COMMAND_MARKER = "RMD_NOTEBOOKS_COMMAND_V1";
+const COMMAND_MARKER = "RMD_NOTEBOOKS_COMMAND_V2";
 const COMMAND_END_MARKER = "RMD_NOTEBOOKS_END";
 
 interface RawExecutionPayload {
@@ -38,6 +38,7 @@ interface RawExecutionPayload {
 interface DataFrameRenderOptions {
   render: boolean;
   maxRows: number;
+  maxColumns: number;
 }
 
 interface PendingExecution {
@@ -85,7 +86,8 @@ export class RExecutor implements Executor {
     const timeoutMs = configuration.get<number>("execution.interactiveFallbackTimeoutMs", 0);
     const dataFrame: DataFrameRenderOptions = {
       render: configuration.get<boolean>("output.dataFrameRender", true),
-      maxRows: configuration.get<number>("output.dataFrameMaxRows", 50)
+      maxRows: configuration.get<number>("output.dataFrameMaxRows", 50),
+      maxColumns: configuration.get<number>("output.dataFrameMaxColumns", 50)
     };
     const payload = await session.execute(
       context.code,
@@ -408,6 +410,7 @@ class RSession {
     this.process.stdin.write(`PLOT_DPI:${request.plot?.dpi ?? ""}\n`);
     this.process.stdin.write(`DF_RENDER:${request.dataFrame?.render === false ? "0" : "1"}\n`);
     this.process.stdin.write(`DF_MAX_ROWS:${request.dataFrame?.maxRows ?? ""}\n`);
+    this.process.stdin.write(`DF_MAX_COLUMNS:${request.dataFrame?.maxColumns ?? ""}\n`);
     const codeLines = toProtocolLines(request.code);
     this.process.stdin.write(`CODE_COUNT:${codeLines.length}\n`);
     for (const line of codeLines) {

@@ -160,6 +160,73 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(state.outputs.some((record) => record.outputTypes.includes("html")));
   });
 
+  it("renders data frames as escaped HTML without losing matrix columns", async () => {
+    await writeFixture(
+      "data-frame-html.qmd",
+      [
+        "# Data frame HTML",
+        "",
+        "```{r frame}",
+        "data.frame(text = c('<b>&', 'plain'), matrix_values = I(matrix(1:4, nrow = 2)))",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("data-frame-html.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const codeCell = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
+    const renderedCell = await waitForNotebookOutput(codeCell, (cell) =>
+      cell.outputs.some((output) => output.items.some((item) => item.mime === "text/html"))
+    );
+    const html = notebookOutputText(renderedCell, "text/html");
+
+    assert.ok(html.includes("&lt;b&gt;&amp;"), "Cell contents should be HTML-escaped.");
+    assert.ok(html.includes("matrix_values.1") && html.includes("matrix_values.2"), "Matrix columns should be expanded like normal R output.");
+    assert.match(html, /<td>3<\/td>[\s\S]*<td>4<\/td>/, "Expanded matrix-column values should not be dropped.");
+  });
+
+  it("truncates data-frame rows and columns and can restore plain-text output", async () => {
+    await writeFixture(
+      "data-frame-truncation.qmd",
+      [
+        "# Data frame truncation",
+        "",
+        "```{r frame}",
+        "data.frame(c1 = 1:6, c2 = 11:16, c3 = 21:26, c4 = 31:36, c5 = 41:46, c6 = 51:56)",
+        "```",
+        ""
+      ].join("\n")
+    );
+    await updateTestSetting("output.dataFrameMaxRows", 4);
+    await updateTestSetting("output.dataFrameMaxColumns", 4);
+
+    const editor = await openNotebookEditor("data-frame-truncation.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const codeCell = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
+    const renderedCell = await waitForNotebookOutput(codeCell, (cell) =>
+      cell.outputs.some((output) => output.items.some((item) => item.mime === "text/html"))
+    );
+    const html = notebookOutputText(renderedCell, "text/html");
+    assert.ok(html.includes("6 rows &times; 6 columns"));
+    assert.ok(html.includes("<th>c1</th>") && html.includes("<th>c2</th>"));
+    assert.ok(html.includes("<th>c5</th>") && html.includes("<th>c6</th>"));
+    assert.ok(!html.includes("<th>c3</th>") && !html.includes("<th>c4</th>"));
+    assert.ok(html.includes("rmd-df-ellipsis"));
+
+    await updateTestSetting("output.dataFrameRender", false);
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    const plainCell = await waitForNotebookOutput(codeCell, (cell) =>
+      cell.outputs.some((output) => output.items.some((item) => item.mime === "application/vnd.code.notebook.stdout")) &&
+      cell.outputs.every((output) => output.items.every((item) => item.mime !== "text/html"))
+    );
+    assert.ok(notebookOutputText(plainCell, "application/vnd.code.notebook.stdout").includes("c1"));
+  });
+
   it("evaluates inline chunks in the global environment without exposing protocol internals", async () => {
     await writeFixture(
       "global-env.qmd",
@@ -1458,6 +1525,9 @@ async function resetTestSettings(): Promise<void> {
   await updateTestSetting("r.startupTimeoutMs", undefined);
   await updateTestSetting("execution.interactiveFallbackTimeoutMs", 0);
   await updateTestSetting("execution.interactiveFallbackBehavior", "prompt");
+  await updateTestSetting("output.dataFrameRender", undefined);
+  await updateTestSetting("output.dataFrameMaxRows", undefined);
+  await updateTestSetting("output.dataFrameMaxColumns", undefined);
 }
 
 async function updateTestSetting(section: string, value: unknown): Promise<void> {
@@ -1497,6 +1567,14 @@ function findCodeCellIndex(notebook: vscode.NotebookDocument, snippet: string): 
 
 function singleCellRange(index: number): vscode.NotebookRange {
   return new vscode.NotebookRange(index, index + 1);
+}
+
+function notebookOutputText(cell: vscode.NotebookCell, mime: string): string {
+  return cell.outputs
+    .flatMap((output) => output.items)
+    .filter((item) => item.mime === mime)
+    .map((item) => Buffer.from(item.data).toString("utf8"))
+    .join("\n");
 }
 
 async function waitForNotebookOutput(

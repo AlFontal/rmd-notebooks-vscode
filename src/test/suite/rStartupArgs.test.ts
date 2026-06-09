@@ -65,6 +65,10 @@ describe("rStartupArgs", () => {
     assert.deepEqual(properties["rmdNotebooks.r.args"].default, [...DEFAULT_INLINE_R_ARGS]);
     assert.deepEqual(properties["rmdNotebooks.r.terminalArgs"].default, [...DEFAULT_TERMINAL_R_ARGS]);
     assert.equal(properties["rmdNotebooks.r.sourceVscodeRSessionWatcher"].default, true);
+    assert.equal(properties["rmdNotebooks.output.dataFrameMaxRows"].type, "integer");
+    assert.equal(properties["rmdNotebooks.output.dataFrameMaxRows"].default, 50);
+    assert.equal(properties["rmdNotebooks.output.dataFrameMaxColumns"].type, "integer");
+    assert.equal(properties["rmdNotebooks.output.dataFrameMaxColumns"].default, 50);
   });
 });
 

@@ -27,12 +27,15 @@ encode <- function(value) {
 
 protocol_command <- function(code) {
   c(
-    "RMD_NOTEBOOKS_COMMAND_V1",
+    "RMD_NOTEBOOKS_COMMAND_V2",
     paste0("WORKDIR:", encode(repo_root)),
     paste0("ARTIFACT_DIR:", encode(artifact_dir)),
     "PLOT_WIDTH:",
     "PLOT_HEIGHT:",
     "PLOT_DPI:",
+    "DF_RENDER:1",
+    "DF_MAX_ROWS:50",
+    "DF_MAX_COLUMNS:50",
     paste0("CODE_COUNT:", length(code)),
     paste0("LINE:", vapply(code, encode, character(1), USE.NAMES = FALSE)),
     "RMD_NOTEBOOKS_END"

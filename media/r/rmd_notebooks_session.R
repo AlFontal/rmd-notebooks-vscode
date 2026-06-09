@@ -43,19 +43,63 @@ rmd_notebooks_escape_html <- function(text) {
   text
 }
 
-rmd_notebooks_format_rows <- function(display) {
-  column_count <- length(display)
-  formatted <- lapply(seq_len(column_count), function(index) {
-    column <- display[[index]]
-    rendered <- format(column, trim = TRUE, justify = "left")
-    rendered[is.na(column)] <- "NA"
-    rmd_notebooks_escape_html(rendered)
-  })
-  row_labels <- rmd_notebooks_escape_html(rownames(display))
-  row_count <- nrow(display)
+rmd_notebooks_truncation_plan <- function(total, max_items, shown_cap) {
+  truncated <- is.finite(max_items) && max_items > 0 && total > max_items
+  shown <- if (truncated) min(shown_cap, as.integer(max_items)) else total
+  head_count <- as.integer(ceiling(shown / 2))
+  tail_count <- shown - head_count
+  indices <- c(
+    if (head_count > 0) seq_len(head_count) else integer(),
+    if (tail_count > 0) seq.int(total - tail_count + 1L, total) else integer()
+  )
+  list(truncated = truncated, indices = indices, head_count = head_count, tail_count = tail_count)
+}
 
-  vapply(seq_len(row_count), function(row_index) {
-    cells <- vapply(formatted, function(column) column[row_index], character(1))
+rmd_notebooks_format_data_frame <- function(df, row_indices, column_indices) {
+  selected_rows <- as.data.frame(df[row_indices, , drop = FALSE])
+  selected <- selected_rows[, column_indices, drop = FALSE]
+  if (ncol(selected) == 0) {
+    return(matrix(character(), nrow = nrow(selected), ncol = 0))
+  }
+  as.matrix(format(selected, trim = TRUE, justify = "left"))
+}
+
+rmd_notebooks_truncate_formatted_columns <- function(display, max_columns, force = FALSE) {
+  plan <- rmd_notebooks_truncation_plan(ncol(display), max_columns, 20L)
+  if (!force && !plan$truncated) {
+    return(display)
+  }
+
+  if (!plan$truncated) {
+    shown <- min(20L, as.integer(max_columns), ncol(display))
+    plan$head_count <- as.integer(ceiling(shown / 2))
+    plan$tail_count <- shown - plan$head_count
+    plan$indices <- c(
+      if (plan$head_count > 0) seq_len(plan$head_count) else integer(),
+      if (plan$tail_count > 0) seq.int(ncol(display) - plan$tail_count + 1L, ncol(display)) else integer()
+    )
+  }
+
+  head_columns <- if (plan$head_count > 0) display[, utils::head(plan$indices, plan$head_count), drop = FALSE] else NULL
+  tail_columns <- if (plan$tail_count > 0) display[, utils::tail(plan$indices, plan$tail_count), drop = FALSE] else NULL
+  ellipsis <- matrix(rep("...", nrow(display)), ncol = 1, dimnames = list(NULL, "..."))
+  do.call(cbind, Filter(Negate(is.null), list(head_columns, ellipsis, tail_columns)))
+}
+
+rmd_notebooks_format_rows <- function(display, row_labels) {
+  escaped <- if (ncol(display) == 0) {
+    matrix(character(), nrow = nrow(display), ncol = 0)
+  } else {
+    result <- apply(display, 2, rmd_notebooks_escape_html)
+    if (is.null(dim(result))) {
+      result <- matrix(result, nrow = nrow(display), dimnames = dimnames(display))
+    }
+    result
+  }
+  row_labels <- rmd_notebooks_escape_html(row_labels)
+
+  vapply(seq_len(nrow(display)), function(row_index) {
+    cells <- escaped[row_index, , drop = TRUE]
     sprintf(
       "<tr><th>%s</th>%s</tr>",
       if (length(row_labels) >= row_index) row_labels[row_index] else "",
@@ -64,37 +108,35 @@ rmd_notebooks_format_rows <- function(display) {
   }, character(1))
 }
 
-rmd_notebooks_data_frame_to_html <- function(df, max_rows) {
+rmd_notebooks_data_frame_to_html <- function(df, max_rows, max_columns) {
   total_rows <- nrow(df)
   total_cols <- ncol(df)
-  # Replicate pandas: show every row up to max_rows; once exceeded, collapse to the
-  # first and last rows (min_rows, capped at max_rows) with an ellipsis row between.
-  truncated <- is.finite(max_rows) && max_rows > 0 && total_rows > max_rows
+  row_plan <- rmd_notebooks_truncation_plan(total_rows, max_rows, 10L)
+  column_plan <- rmd_notebooks_truncation_plan(total_cols, max_columns, 20L)
+  display <- rmd_notebooks_format_data_frame(df, row_plan$indices, column_plan$indices)
+  display <- rmd_notebooks_truncate_formatted_columns(display, max_columns, column_plan$truncated)
 
-  body_rows <- character()
-  if (truncated) {
-    shown <- min(10L, as.integer(max_rows))
-    head_count <- as.integer(ceiling(shown / 2))
-    tail_count <- shown - head_count
-    head_rows <- rmd_notebooks_format_rows(head(df, head_count))
+  row_labels <- rownames(df)[row_plan$indices]
+  formatted_rows <- rmd_notebooks_format_rows(display, row_labels)
+  body_rows <- formatted_rows
+  if (row_plan$truncated) {
     ellipsis <- sprintf(
       "<tr class=\"rmd-df-ellipsis\"><th>...</th>%s</tr>",
-      paste(rep("<td>...</td>", total_cols), collapse = "")
+      paste(rep("<td>...</td>", ncol(display)), collapse = "")
     )
-    body_rows <- c(head_rows, ellipsis)
-    if (tail_count > 0) {
-      body_rows <- c(body_rows, rmd_notebooks_format_rows(tail(df, tail_count)))
-    }
-  } else {
-    body_rows <- rmd_notebooks_format_rows(df)
+    body_rows <- append(formatted_rows, ellipsis, after = row_plan$head_count)
   }
 
-  header_cells <- paste0("<th>", rmd_notebooks_escape_html(names(df)), "</th>", collapse = "")
+  header_cells <- if (ncol(display) > 0) {
+    paste0("<th>", rmd_notebooks_escape_html(colnames(display)), "</th>", collapse = "")
+  } else {
+    ""
+  }
   thead <- sprintf("<thead><tr><th></th>%s</tr></thead>", header_cells)
   tbody <- sprintf("<tbody>%s</tbody>", paste(body_rows, collapse = ""))
 
   # pandas only prints the dimensions line when the frame is truncated.
-  meta <- if (truncated) {
+  meta <- if (row_plan$truncated || column_plan$truncated || ncol(display) > max_columns) {
     sprintf("<p class=\"rmd-df-meta\">%d rows &times; %d columns</p>", total_rows, total_cols)
   } else {
     ""
@@ -370,7 +412,7 @@ rmd_notebooks_update_vscode_r_workspace <- function() {
   })
 }
 
-rmd_notebooks_execute <- function(code, working_directory, artifact_directory, plot_width_in, plot_height_in, plot_dpi, df_render, df_max_rows) {
+rmd_notebooks_execute <- function(code, working_directory, artifact_directory, plot_width_in, plot_height_in, plot_dpi, df_render, df_max_rows, df_max_columns) {
   if (nzchar(working_directory) && dir.exists(working_directory)) {
     setwd(working_directory)
   }
@@ -412,7 +454,7 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
         if (result$visible && !is.null(result$value)) {
           html_output <- rmd_notebooks_render_html(result$value)
           if (is.null(html_output) && isTRUE(df_render) && is.data.frame(result$value)) {
-            html_output <- rmd_notebooks_data_frame_to_html(result$value, df_max_rows)
+            html_output <- rmd_notebooks_data_frame_to_html(result$value, df_max_rows, df_max_columns)
           }
           if (!is.null(html_output)) {
             html_buffer <- c(html_buffer, html_output)
@@ -478,7 +520,7 @@ repeat {
     break
   }
 
-  if (!identical(command, "RMD_NOTEBOOKS_COMMAND_V1")) {
+  if (!identical(command, "RMD_NOTEBOOKS_COMMAND_V2")) {
     next
   }
 
@@ -489,6 +531,7 @@ repeat {
   plot_dpi <- readLines(con = stdin(), n = 1, warn = FALSE)
   df_render_line <- readLines(con = stdin(), n = 1, warn = FALSE)
   df_max_rows_line <- readLines(con = stdin(), n = 1, warn = FALSE)
+  df_max_columns_line <- readLines(con = stdin(), n = 1, warn = FALSE)
   code_count_line <- readLines(con = stdin(), n = 1, warn = FALSE)
 
   working_directory <- sub("^WORKDIR:", "", working_directory)
@@ -497,9 +540,13 @@ repeat {
   plot_height_in <- sub("^PLOT_HEIGHT:", "", plot_height_in)
   plot_dpi <- sub("^PLOT_DPI:", "", plot_dpi)
   df_render <- !identical(sub("^DF_RENDER:", "", df_render_line), "0")
-  df_max_rows <- suppressWarnings(as.numeric(sub("^DF_MAX_ROWS:", "", df_max_rows_line)))
+  df_max_rows <- suppressWarnings(as.integer(sub("^DF_MAX_ROWS:", "", df_max_rows_line)))
   if (!is.finite(df_max_rows) || df_max_rows < 1) {
     df_max_rows <- 50
+  }
+  df_max_columns <- suppressWarnings(as.integer(sub("^DF_MAX_COLUMNS:", "", df_max_columns_line)))
+  if (!is.finite(df_max_columns) || df_max_columns < 1) {
+    df_max_columns <- 50
   }
   code_count <- suppressWarnings(as.integer(sub("^CODE_COUNT:", "", code_count_line)))
   if (!is.finite(code_count) || code_count < 0) {
@@ -530,7 +577,8 @@ repeat {
     suppressWarnings(as.numeric(plot_height_in)),
     suppressWarnings(as.numeric(plot_dpi)),
     df_render,
-    df_max_rows
+    df_max_rows,
+    df_max_columns
   )
 
   cat("RMD_NOTEBOOKS_RESULT_START\n")
