@@ -4,6 +4,7 @@ import { OutputChannelController } from "./editor/outputChannelController";
 import { ExecutorRegistry } from "./execution/executorRegistry";
 import { RExecutor } from "./execution/rExecutor";
 import { RTerminalRunner } from "./execution/rTerminalRunner";
+import { maybeRecommendRExtension } from "./integration/rExtensionRecommendation";
 import { InlineChunksCellStatusBarProvider } from "./notebook/cellStatusBarProvider";
 import { InlineChunksNotebookRuntime } from "./notebook/notebookRuntime";
 import { InlineChunksNotebookSerializer } from "./notebook/notebookSerializer";
@@ -66,6 +67,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
   );
 
   await notebookRuntime.initialize();
+  const recommendationTimer = setTimeout(() => void maybeRecommendRExtension(context), 2000);
+  context.subscriptions.push(new vscode.Disposable(() => clearTimeout(recommendationTimer)));
 
   return {
     getDocumentState: async (documentUri: string) => notebookRuntime.getDocumentState(documentUri),

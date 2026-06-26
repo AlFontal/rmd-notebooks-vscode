@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- publish separate VS Code Marketplace and Open VSX VSIX variants so VS Code keeps the vscode-R dependency while Positron and other Open VSX hosts do not install an incompatible R extension (#17)
+- show a one-time vscode-R recommendation in compatible non-Positron hosts when the optional workspace-viewer integration is missing
+- mark Rmd Notebooks as the default editor for `.qmd` and `.Rmd` files so VS Code-compatible hosts open them as notebooks by default
+
 ## 0.4.0
 
 - queue inline R chunk requests in execution order, show waiting cells as pending, and support cancelling one cell without dropping the rest of the queue

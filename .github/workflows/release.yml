@@ -39,7 +39,8 @@ jobs:
       - run: npm ci
       - run: npm run release:verify-version
       - run: npm run test:unit
-      - run: npm run package:vsix
+      - run: npm run package:vsix:marketplace
+      - run: npm run package:vsix:openvsx
 
       - uses: actions/upload-artifact@v4
         with:
@@ -54,7 +55,7 @@ jobs:
 
       - name: Publish to VS Code Marketplace
         if: github.event_name == 'release' || inputs.publish_marketplace
-        run: npm run deploy
+        run: npx vsce publish --packagePath *-marketplace.vsix
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
@@ -66,6 +67,6 @@ jobs:
 
       - name: Publish to Open VSX
         if: github.event_name == 'release' || inputs.publish_openvsx
-        run: npm run deploy:openvsx -- -p "$OVSX_PAT"
+        run: npx ovsx publish *-openvsx.vsix -p "$OVSX_PAT"
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
