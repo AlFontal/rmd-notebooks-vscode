@@ -1,10 +1,7 @@
 #!/usr/bin/env node
 
 const { execFileSync } = require("node:child_process");
-const fs = require("node:fs");
 const path = require("node:path");
-
-const packageJson = require("../package.json");
 
 function git(args, fallback) {
   try {
@@ -28,11 +25,12 @@ function slug(value) {
 const branch = process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || git(["branch", "--show-current"], "local");
 const sha = (process.env.GITHUB_SHA || git(["rev-parse", "--short", "HEAD"], "unknown")).slice(0, 12);
 const suffix = slug(process.argv[2] || `${branch}-${sha}`);
-const outputFile = `${packageJson.name}-${packageJson.version}-${suffix}.vsix`;
 
-fs.rmSync(outputFile, { force: true });
-execFileSync(process.platform === "win32" ? "npx.cmd" : "npx", ["vsce", "package", "--out", outputFile], {
-  stdio: "inherit"
-});
+for (const variant of ["marketplace", "openvsx"]) {
+  execFileSync(process.execPath, [path.join(__dirname, "package_variant_vsix.cjs"), variant, suffix], {
+    cwd: path.resolve(__dirname, ".."),
+    stdio: "inherit"
+  });
+}
 
-console.log(`Packaged test VSIX: ${path.resolve(outputFile)}`);
+console.log("Packaged test VSIX variants.");

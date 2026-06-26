@@ -28,11 +28,10 @@ Rmd Notebooks opens R Markdown and Quarto documents as runnable notebooks withou
 
 ## Requirements
 
-- VS Code `^1.88.0`
+- VS Code-compatible editor API `^1.88.0`
 - R available on your PATH, or configured with `rmdNotebooks.r.path`
-- The [vscode-R extension](https://marketplace.visualstudio.com/items?itemName=REditorSupport.r), installed automatically as an extension dependency
 
-The vscode-R dependency is used for normal R tooling integration, including the R workspace viewer. Inline sessions can source vscode-R's session watcher so variables created in notebook chunks appear in the R sidebar.
+The VS Code Marketplace package installs the [vscode-R extension](https://marketplace.visualstudio.com/items?itemName=REditorSupport.r) automatically for normal R tooling integration, including the R workspace viewer. The Open VSX package keeps vscode-R optional so Positron and other VS Code-compatible editors that provide their own R support can install Rmd Notebooks without an incompatible dependency.
 
 ## What It Does
 
@@ -52,7 +51,7 @@ The vscode-R dependency is used for normal R tooling integration, including the 
 
 ## Workspace Viewer
 
-Inline R sessions integrate with vscode-R's workspace watcher when `~/.vscode-R/init.R` is available. With the default settings, variables created from notebook chunks should appear under the R sidebar's Global Environment section.
+Inline R sessions integrate with vscode-R's workspace watcher when `~/.vscode-R/init.R` is available. In VS Code this is set up by the vscode-R extension. In Open VSX-based editors other than Positron, Rmd Notebooks may show a one-time prompt to install vscode-R if it is missing. Positron users should rely on Positron's built-in R support instead.
 
 You can verify the integration from a notebook cell:
 
@@ -80,7 +79,7 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 - Only a subset of knitr options is enforced today: `eval=FALSE`, `include=FALSE`, `results='hide'`, `fig.width`, `fig.height`, `fig.asp`, and `dpi`
 - `echo`, `warning`, and `message` are parsed but not fully enforced
 - Unsupported interactive flows can fall back to an R terminal only when `rmdNotebooks.execution.interactiveFallbackTimeoutMs` is enabled
-- vscode-R workspace integration depends on vscode-R's current session watcher internals
+- vscode-R workspace integration is optional on Open VSX builds and depends on vscode-R's current session watcher internals
 
 ## Commands
 
@@ -102,7 +101,7 @@ The notebook toolbar also exposes `Stop All Running Chunks`, `Restart R Session`
 - `rmdNotebooks.r.path`: path to the R executable. Defaults to `R`.
 - `rmdNotebooks.r.args`: arguments for inline chunk-execution R sessions. Defaults to `["--slave"]`.
 - `rmdNotebooks.r.terminalArgs`: arguments for the interactive R terminal. Defaults to `["--vanilla"]`.
-- `rmdNotebooks.r.sourceVscodeRSessionWatcher`: source `~/.vscode-R/init.R` in inline R sessions when present. Defaults to `true`.
+- `rmdNotebooks.r.sourceVscodeRSessionWatcher`: source `~/.vscode-R/init.R` in inline R sessions when present. Defaults to `true`; no-ops when vscode-R is not installed.
 - `rmdNotebooks.r.startupTimeoutMs`: time allowed for an inline R session to start. Defaults to `30000` milliseconds.
 - `rmdNotebooks.execution.interactiveFallbackTimeoutMs`: timeout for treating a stalled inline chunk as unsupported interactive input. Defaults to `0`, which disables the timeout.
 - `rmdNotebooks.execution.interactiveFallbackBehavior`: what to do when the optional interactive fallback timeout fires. Defaults to `prompt`.
@@ -143,6 +142,15 @@ npm run smoke:vscode-r
 ```
 
 This starts the inline R protocol with the vscode-R watcher enabled and verifies that variables created by a piped inline chunk appear in vscode-R's `workspace.json`.
+
+Release packaging produces two VSIX variants:
+
+```bash
+npm run package:vsix:marketplace
+npm run package:vsix:openvsx
+```
+
+The Marketplace variant keeps the hard vscode-R dependency. The Open VSX variant removes that dependency and uses an optional in-app recommendation for compatible non-Positron hosts.
 
 To create a shareable test build from the current branch, run:
 

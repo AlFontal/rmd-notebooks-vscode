@@ -102,6 +102,18 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(editor.notebook.getCells().some((cell) => cell.kind === vscode.NotebookCellKind.Code));
   });
 
+  it("opens qmd files as notebooks through the default editor path", async () => {
+    const uri = getWorkspaceFileUri("integration.qmd");
+
+    await vscode.commands.executeCommand("vscode.open", uri);
+    await waitFor(
+      () => vscode.window.activeNotebookEditor?.notebook.uri.toString() === uri.toString() ? true : undefined,
+      3000
+    );
+
+    assert.equal(vscode.window.activeNotebookEditor?.notebook.notebookType, "rmd-notebooks-vscode-notebook");
+  });
+
   it("runs the current qmd chunk and renders stdout inline", async () => {
     const editor = await openNotebookEditor("integration.qmd");
     editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));

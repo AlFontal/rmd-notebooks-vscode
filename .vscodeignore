@@ -21,4 +21,5 @@ azure-pipelines.yml
 scripts/**
 out/test/**
 out/src/test/**
+out/package.json
 .gitignore
