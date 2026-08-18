@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { InlineChunksNotebookRuntime } from "../notebook/notebookRuntime";
 import { serializeNotebookSource } from "../notebook/notebookSource";
 import { INLINE_CHUNKS_NOTEBOOK_TYPE, isInlineChunksNotebook } from "../notebook/notebookTypes";
+import { previewActiveNotebookHtml } from "./previewHtml";
 
 export function registerCommands(controller: InlineChunksNotebookRuntime): vscode.Disposable[] {
   return [
@@ -34,6 +35,9 @@ export function registerCommands(controller: InlineChunksNotebookRuntime): vscod
     }),
     vscode.commands.registerCommand("rmdNotebooks.showOutputChannel", () => {
       controller.showOutputChannel();
+    }),
+    vscode.commands.registerCommand("rmdNotebooks.previewHtml", async () => {
+      await previewActiveNotebookHtml();
     }),
     vscode.commands.registerCommand(
       "rmdNotebooks.editChunkHeader",
