@@ -176,10 +176,12 @@ describe("Rmd Notebooks Notebook Host", () => {
       services
     );
     assert.equal(qmdResult, "previewed");
-    assert.deepEqual(calls.slice(0, 3), [
+    assert.deepEqual(calls.slice(0, 5), [
       "save:qmd",
       "ensure:quarto.quarto:quarto.preview",
-      "execute:quarto.preview"
+      "openRaw",
+      "execute:quarto.preview",
+      "restoreNotebook"
     ]);
 
     await assert.rejects(

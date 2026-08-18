@@ -55,8 +55,13 @@ export async function previewNotebookHtml(request: PreviewRequest, services: Pre
     if (!(await services.ensureIntegration(QUARTO_EXTENSION_ID, QUARTO_PREVIEW_COMMAND, "Quarto"))) {
       return "missing";
     }
-    await services.executeCommand(QUARTO_PREVIEW_COMMAND);
-    return "previewed";
+    try {
+      await services.openRawSource(request.uri, request.viewColumn);
+      await services.executeCommand(QUARTO_PREVIEW_COMMAND);
+      return "previewed";
+    } finally {
+      await services.restoreNotebook(request.uri, request.viewColumn);
+    }
   }
 
   if (!(await services.ensureIntegration(VSCODE_R_EXTENSION_ID, VSCODE_R_PREVIEW_COMMAND, "vscode-R"))) {
