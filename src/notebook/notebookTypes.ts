@@ -18,7 +18,16 @@ export interface InlineChunksMarkupCellMetadata {
   kind: "markup";
 }
 
-export type InlineChunksCellMetadata = InlineChunksCodeCellMetadata | InlineChunksMarkupCellMetadata;
+export interface InlineChunksFrontmatterCellMetadata {
+  kind: "frontmatter";
+  openingFence: "---";
+  closingFence: "---" | "...";
+}
+
+export type InlineChunksCellMetadata =
+  | InlineChunksCodeCellMetadata
+  | InlineChunksMarkupCellMetadata
+  | InlineChunksFrontmatterCellMetadata;
 
 export interface InlineChunksCellMetadataEnvelope {
   rmdNotebooks?: InlineChunksCellMetadata;

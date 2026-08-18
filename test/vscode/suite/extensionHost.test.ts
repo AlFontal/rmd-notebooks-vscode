@@ -102,6 +102,32 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(editor.notebook.getCells().some((cell) => cell.kind === vscode.NotebookCellKind.Code));
   });
 
+  it("opens YAML frontmatter as a non-executable source-preserving cell", async () => {
+    const editor = await openNotebookEditor("integration.rmd");
+    const frontmatter = editor.notebook.cellAt(0);
+
+    assert.equal(frontmatter.kind, vscode.NotebookCellKind.Code);
+    assert.equal(frontmatter.document.languageId, "yaml");
+    assert.equal(frontmatter.document.getText(), 'title: "Integration"\noutput: html_document');
+    assert.equal(frontmatter.metadata?.rmdNotebooks?.kind, "frontmatter");
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      frontmatter.document.uri,
+      new vscode.Range(new vscode.Position(0, 0), frontmatter.document.lineAt(0).range.end),
+      'title: "Updated integration"'
+    );
+    await vscode.workspace.applyEdit(edit);
+    assert.ok(await editor.notebook.save());
+
+    const saved = Buffer.from(await vscode.workspace.fs.readFile(editor.notebook.uri)).toString("utf8");
+    assert.ok(saved.startsWith('---\ntitle: "Updated integration"\noutput: html_document\n---'));
+
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) => candidate.outputs.length === 3);
+    assert.equal(state.snapshot?.chunkIds.length, 3);
+  });
+
   it("opens qmd files as notebooks through the default editor path", async () => {
     const uri = getWorkspaceFileUri("integration.qmd");
 
@@ -1685,7 +1711,7 @@ function getWorkspaceFileUri(name: string): vscode.Uri {
 }
 
 function findFirstCodeCellIndex(notebook: vscode.NotebookDocument): number {
-  const index = notebook.getCells().findIndex((cell) => cell.kind === vscode.NotebookCellKind.Code);
+  const index = notebook.getCells().findIndex(isExecutableChunkCell);
   assert.ok(index >= 0, "A code cell should exist.");
   return index;
 }
@@ -1693,7 +1719,7 @@ function findFirstCodeCellIndex(notebook: vscode.NotebookDocument): number {
 function findLastCodeCellIndex(notebook: vscode.NotebookDocument): number {
   const cells = notebook.getCells();
   for (let index = cells.length - 1; index >= 0; index -= 1) {
-    if (cells[index].kind === vscode.NotebookCellKind.Code) {
+    if (isExecutableChunkCell(cells[index])) {
       return index;
     }
   }
@@ -1703,10 +1729,14 @@ function findLastCodeCellIndex(notebook: vscode.NotebookDocument): number {
 
 function findCodeCellIndex(notebook: vscode.NotebookDocument, snippet: string): number {
   const index = notebook.getCells().findIndex(
-    (cell) => cell.kind === vscode.NotebookCellKind.Code && cell.document.getText().includes(snippet)
+    (cell) => isExecutableChunkCell(cell) && cell.document.getText().includes(snippet)
   );
   assert.ok(index >= 0, `Expected a code cell containing ${snippet}.`);
   return index;
+}
+
+function isExecutableChunkCell(cell: vscode.NotebookCell): boolean {
+  return cell.kind === vscode.NotebookCellKind.Code && cell.metadata?.rmdNotebooks?.kind !== "frontmatter";
 }
 
 function singleCellRange(index: number): vscode.NotebookRange {

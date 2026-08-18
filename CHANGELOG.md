@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- show document frontmatter as an editable, syntax-highlighted YAML cell without making it executable (#19)
+
 ## 0.4.1
 
 - publish separate VS Code Marketplace and Open VSX VSIX variants so VS Code keeps the vscode-R dependency while Positron and other Open VSX hosts do not install an incompatible R extension (#17)
