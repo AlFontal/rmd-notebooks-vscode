@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { formatChunkHeaderBadge, formatChunkHeaderTooltip } from "./metadataDisplay";
+import { parseInlineRExpressions } from "./inlineR";
 import { getInlineChunksMetadata, INLINE_CHUNKS_NOTEBOOK_TYPE } from "./notebookTypes";
 
 interface ChunkIdLookup {
@@ -13,11 +14,33 @@ export class InlineChunksCellStatusBarProvider implements vscode.NotebookCellSta
     cell: vscode.NotebookCell,
     _token: vscode.CancellationToken
   ): vscode.NotebookCellStatusBarItem | vscode.NotebookCellStatusBarItem[] | undefined {
-    if (cell.notebook.notebookType !== INLINE_CHUNKS_NOTEBOOK_TYPE || cell.kind !== vscode.NotebookCellKind.Code) {
+    if (cell.notebook.notebookType !== INLINE_CHUNKS_NOTEBOOK_TYPE) {
       return undefined;
     }
 
     const metadata = getInlineChunksMetadata(cell.metadata);
+    const inlineCount = metadata?.kind === "inline" || cell.kind === vscode.NotebookCellKind.Markup
+      ? parseInlineRExpressions(cell.document.getText()).length
+      : 0;
+    if (inlineCount > 0) {
+      const chunkId = this.chunkIdLookup.getChunkIdForCell(cell.notebook.uri.toString(), cell.index);
+      const item = new vscode.NotebookCellStatusBarItem(
+        `$(play) Inline R ×${inlineCount}`,
+        vscode.NotebookCellStatusBarAlignment.Left
+      );
+      item.tooltip = "Run inline R expressions and render this prose cell";
+      item.priority = 210;
+      item.command = {
+        title: "Run Inline R",
+        command: "rmdNotebooks.runInlineCell",
+        arguments: [cell.notebook.uri.toString(), chunkId, cell.index]
+      };
+      return item;
+    }
+
+    if (cell.kind !== vscode.NotebookCellKind.Code) {
+      return undefined;
+    }
     if (metadata?.kind !== "code") {
       return undefined;
     }

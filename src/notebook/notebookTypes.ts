@@ -24,10 +24,16 @@ export interface InlineChunksFrontmatterCellMetadata {
   closingFence: "---" | "...";
 }
 
+export interface InlineChunksInlineCellMetadata {
+  kind: "inline";
+  expressionCount: number;
+}
+
 export type InlineChunksCellMetadata =
   | InlineChunksCodeCellMetadata
   | InlineChunksMarkupCellMetadata
-  | InlineChunksFrontmatterCellMetadata;
+  | InlineChunksFrontmatterCellMetadata
+  | InlineChunksInlineCellMetadata;
 
 export interface InlineChunksCellMetadataEnvelope {
   rmdNotebooks?: InlineChunksCellMetadata;
