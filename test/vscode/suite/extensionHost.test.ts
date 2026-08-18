@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { afterEach, before, beforeEach, describe, it } from "mocha";
 import * as vscode from "vscode";
+import { PreviewServices, previewNotebookHtml } from "../../../src/commands/previewHtml";
 
 interface InlineChunksExtensionApi {
   getDocumentState(documentUri: string): Promise<{
@@ -138,6 +139,120 @@ describe("Rmd Notebooks Notebook Host", () => {
     );
 
     assert.equal(vscode.window.activeNotebookEditor?.notebook.notebookType, "rmd-notebooks-vscode-notebook");
+  });
+
+  it("routes saved notebook previews and restores Rmd notebook view after failures", async () => {
+    const calls: string[] = [];
+    const services: PreviewServices = {
+      ensureIntegration: async (extensionId, commandId) => {
+        calls.push(`ensure:${extensionId}:${commandId}`);
+        return true;
+      },
+      executeCommand: async (commandId) => {
+        calls.push(`execute:${commandId}`);
+        if (commandId === "r.rmarkdown.showPreviewToSide") {
+          throw new Error("preview failed");
+        }
+      },
+      openRawSource: async () => {
+        calls.push("openRaw");
+      },
+      restoreNotebook: async () => {
+        calls.push("restoreNotebook");
+      },
+      showWarning: async (message) => {
+        calls.push(`warning:${message}`);
+      }
+    };
+
+    const qmdResult = await previewNotebookHtml(
+      {
+        uri: vscode.Uri.file("/tmp/preview.qmd"),
+        save: async () => {
+          calls.push("save:qmd");
+          return true;
+        }
+      },
+      services
+    );
+    assert.equal(qmdResult, "previewed");
+    assert.deepEqual(calls.slice(0, 3), [
+      "save:qmd",
+      "ensure:quarto.quarto:quarto.preview",
+      "execute:quarto.preview"
+    ]);
+
+    await assert.rejects(
+      previewNotebookHtml(
+        {
+          uri: vscode.Uri.file("/tmp/preview.Rmd"),
+          save: async () => {
+            calls.push("save:rmd");
+            return true;
+          }
+        },
+        services
+      ),
+      /preview failed/
+    );
+    assert.deepEqual(calls.slice(-5), [
+      "save:rmd",
+      "ensure:REditorSupport.r:r.rmarkdown.showPreviewToSide",
+      "openRaw",
+      "execute:r.rmarkdown.showPreviewToSide",
+      "restoreNotebook"
+    ]);
+  });
+
+  it("does not preview when saving is cancelled or an integration is missing", async () => {
+    const calls: string[] = [];
+    const services: PreviewServices = {
+      ensureIntegration: async () => {
+        calls.push("ensure");
+        return false;
+      },
+      executeCommand: async () => {
+        calls.push("execute");
+      },
+      openRawSource: async () => {
+        calls.push("openRaw");
+      },
+      restoreNotebook: async () => {
+        calls.push("restoreNotebook");
+      },
+      showWarning: async () => {
+        calls.push("warning");
+      }
+    };
+
+    const cancelled = await previewNotebookHtml(
+      { uri: vscode.Uri.file("/tmp/preview.qmd"), save: async () => false },
+      services
+    );
+    assert.equal(cancelled, "cancelled");
+    assert.deepEqual(calls, ["warning"]);
+
+    const missing = await previewNotebookHtml(
+      { uri: vscode.Uri.file("/tmp/preview.qmd"), save: async () => true },
+      services
+    );
+    assert.equal(missing, "missing");
+    assert.deepEqual(calls, ["warning", "ensure"]);
+
+    let unsupportedSaveCalled = false;
+    const unsupported = await previewNotebookHtml(
+      {
+        uri: vscode.Uri.file("/tmp/preview.md"),
+        save: async () => {
+          unsupportedSaveCalled = true;
+          return true;
+        }
+      },
+      services
+    );
+    assert.equal(unsupported, "unsupported");
+    assert.equal(unsupportedSaveCalled, false);
+    assert.deepEqual(calls, ["warning", "ensure", "warning"]);
   });
 
   it("runs the current qmd chunk and renders stdout inline", async () => {

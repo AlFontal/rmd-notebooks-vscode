@@ -13,4 +13,14 @@ describe("package manifest", () => {
   it("contributes an inline R execution command", () => {
     assert.ok(packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.runInlineCell"));
   });
+
+  it("contributes HTML preview without duplicating Quarto's notebook button", () => {
+    assert.ok(packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.previewHtml"));
+    const previewMenus = packageJson.contributes.menus["notebook/toolbar"].filter(
+      (entry) => entry.command === "rmdNotebooks.previewHtml"
+    );
+    assert.equal(previewMenus.length, 2);
+    assert.ok(previewMenus.some((entry) => entry.when.includes("resourceExtname =~")));
+    assert.ok(previewMenus.some((entry) => entry.when.includes("!rmdNotebooks.quartoExtensionInstalled")));
+  });
 });

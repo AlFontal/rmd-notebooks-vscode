@@ -46,6 +46,7 @@ The VS Code Marketplace package installs the [vscode-R extension](https://market
 - Marks outputs stale after code edits
 - Supports cancelling an individual running or queued cell, plus Stop All for the active notebook run
 - Supports notebook commands for run current chunk, run all chunks, restart session, clear outputs, and source view
+- Opens `.Rmd` HTML previews through vscode-R and `.qmd` previews through Quarto without leaving notebook view
 - Supports chunk-header editing from notebook mode
 - Handles common prompt-style interactions such as `menu()` and `readline()` with VS Code UI
 - Lets unsupported interactive chunks fall back to an R terminal when the optional timeout is enabled
@@ -93,6 +94,7 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 - `Rmd Notebooks: Restart R Session`
 - `Rmd Notebooks: Run Current Chunk in R Terminal`
 - `Rmd Notebooks: Show Output Panel`
+- `Rmd Notebooks: Preview HTML`
 - `Rmd Notebooks: Edit Chunk Header`
 - `Rmd Notebooks: Toggle Notebook / Raw Source View`
 
