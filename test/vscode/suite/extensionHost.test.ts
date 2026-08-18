@@ -300,6 +300,121 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(outputText.includes("protocol=FALSE"));
   });
 
+  it("evaluates inline R prose in document order and preserves its source", async () => {
+    await writeFixture(
+      "inline-prose.qmd",
+      [
+        "# Inline prose",
+        "",
+        "```{r setup}",
+        "inline_value <- 41",
+        "```",
+        "",
+        "The answer is `{r} inline_value + 1` and `r paste(\"hello\", \"world\")`.",
+        "",
+        "```{r update}",
+        "inline_value <- inline_value + 1",
+        "```",
+        "",
+        "The updated answer is `r inline_value`.",
+        ""
+      ].join("\n")
+    );
+
+    let editor = await openNotebookEditor("inline-prose.qmd");
+    const inlineCells = editor.notebook.getCells().filter(
+      (cell) => cell.metadata?.rmdNotebooks?.kind === "inline"
+    );
+    assert.equal(inlineCells.length, 2);
+    assert.ok(inlineCells.every((cell) => cell.kind === vscode.NotebookCellKind.Code));
+    assert.ok(inlineCells.every((cell) => cell.document.languageId === "markdown"));
+
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(
+      editor.notebook.uri,
+      (candidate) => candidate.outputs.length === 4 && candidate.outputs.filter((output) => output.outputTypes.includes("markdown")).length === 2
+    );
+    assert.equal(state.snapshot?.chunkIds.length, 4);
+
+    const firstRendered = await waitForNotebookOutput(inlineCells[0], (cell) =>
+      notebookOutputText(cell, "text/markdown").includes("The answer is 42 and hello world.")
+    );
+    const secondRendered = await waitForNotebookOutput(inlineCells[1], (cell) =>
+      notebookOutputText(cell, "text/markdown").includes("The updated answer is 42.")
+    );
+    assert.ok(notebookOutputText(firstRendered, "text/markdown").includes("The answer is 42 and hello world."));
+    assert.ok(notebookOutputText(secondRendered, "text/markdown").includes("The updated answer is 42."));
+
+    const sourceEdit = new vscode.WorkspaceEdit();
+    sourceEdit.replace(
+      inlineCells[0].document.uri,
+      fullDocumentRange(inlineCells[0].document),
+      inlineCells[0].document.getText().replace("inline_value + 1", "inline_value + 2")
+    );
+    await vscode.workspace.applyEdit(sourceEdit);
+    await waitForDocumentState(
+      editor.notebook.uri,
+      (candidate) => candidate.outputs.some((output) => output.stale && output.outputTypes.includes("markdown"))
+    );
+    await waitForNotebookOutput(inlineCells[0], (cell) =>
+      notebookOutputText(cell, "text/markdown").includes("Stale output")
+    );
+    await vscode.commands.executeCommand(
+      "rmdNotebooks.runInlineCell",
+      editor.notebook.uri.toString(),
+      undefined,
+      inlineCells[0].index
+    );
+    await waitForNotebookOutput(inlineCells[0], (cell) =>
+      notebookOutputText(cell, "text/markdown").includes("The answer is 44 and hello world.")
+    );
+
+    assert.ok(await editor.notebook.save());
+    const savedSource = Buffer.from(await vscode.workspace.fs.readFile(editor.notebook.uri)).toString("utf8");
+    assert.ok(savedSource.includes("The answer is `{r} inline_value + 2` and `r paste"));
+    assert.ok(!savedSource.includes("The answer is 42"));
+
+    await closeAllEditors();
+    editor = await openNotebookEditor("inline-prose.qmd");
+    const reopenedInline = editor.notebook.getCells().find(
+      (cell) => cell.metadata?.rmdNotebooks?.kind === "inline" && cell.document.getText().includes("The answer is")
+    );
+    assert.ok(reopenedInline);
+    await waitForNotebookOutput(reopenedInline, (cell) =>
+      notebookOutputText(cell, "text/markdown").includes("The answer is 44 and hello world.")
+    );
+
+    editor.selection = singleCellRange(reopenedInline.index);
+    await vscode.commands.executeCommand("rmdNotebooks.clearCurrentOutput");
+    await waitForNotebookOutput(reopenedInline, (cell) =>
+      notebookOutputText(cell, "text/markdown").includes("`{r} inline_value + 2`")
+    );
+  });
+
+  it("promotes newly authored inline prose and retains source beside evaluation errors", async () => {
+    await writeFixture("promote-inline.qmd", "# Promotion\n\nPlain prose.\n");
+    const editor = await openNotebookEditor("promote-inline.qmd");
+    const markupIndex = editor.notebook.getCells().findIndex(
+      (cell) => cell.kind === vscode.NotebookCellKind.Markup && cell.document.getText().includes("Plain prose")
+    );
+    assert.ok(markupIndex >= 0);
+    const markup = editor.notebook.cellAt(markupIndex);
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(markup.document.uri, fullDocumentRange(markup.document), "Value: `r stop(\"inline boom\")`.");
+    await vscode.workspace.applyEdit(edit);
+
+    editor.selection = singleCellRange(markupIndex);
+    await vscode.commands.executeCommand("rmdNotebooks.runInlineCell");
+
+    const promoted = editor.notebook.cellAt(markupIndex);
+    assert.equal(promoted.metadata?.rmdNotebooks?.kind, "inline");
+    const rendered = await waitForNotebookOutput(promoted, (cell) =>
+      notebookOutputText(cell, "text/markdown").includes("stop") &&
+      notebookOutputText(cell, "application/vnd.code.notebook.stderr").includes("inline boom")
+    );
+    assert.ok(notebookOutputText(rendered, "text/markdown").includes('Value: `r stop("inline boom")`.'));
+  });
+
   it("honors project .Rprofile startup files by default", async () => {
     await writeFixture(".Rprofile", "rprofile_marker <- 41\n");
     await writeFixture(
@@ -1708,6 +1823,11 @@ function getWorkspaceFileUri(name: string): vscode.Uri {
   const folder = vscode.workspace.workspaceFolders?.[0];
   assert.ok(folder, "A workspace folder should be available for integration tests.");
   return vscode.Uri.joinPath(folder.uri, name);
+}
+
+function fullDocumentRange(document: vscode.TextDocument): vscode.Range {
+  const lastLine = document.lineAt(Math.max(0, document.lineCount - 1));
+  return new vscode.Range(new vscode.Position(0, 0), lastLine.range.end);
 }
 
 function findFirstCodeCellIndex(notebook: vscode.NotebookDocument): number {

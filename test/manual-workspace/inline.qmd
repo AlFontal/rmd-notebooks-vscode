@@ -1,0 +1,10 @@
+---
+title: Inline R prose
+---
+
+```{r setup}
+radius <- 5
+```
+
+The radius is `{r} radius`, so the diameter is `r radius * 2`.
+

@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as vscode from "vscode";
-import { ErrorOutputItem, HtmlOutputItem, ImageOutputItem, OutputItem, TextOutputItem } from "../document/chunkTypes";
+import { ErrorOutputItem, HtmlOutputItem, ImageOutputItem, MarkdownOutputItem, OutputItem, TextOutputItem } from "../document/chunkTypes";
 import {
   Executor,
   ExecutionCancellationToken,
@@ -32,6 +32,7 @@ interface RawExecutionPayload {
   stdout: string;
   stderr: string;
   html: string;
+  markdown: string;
   plots: string[];
 }
 
@@ -122,6 +123,13 @@ export class RExecutor implements Executor {
         type: "html",
         html: payload.html.trim()
       } satisfies HtmlOutputItem);
+    }
+
+    if (payload.markdown.trim().length > 0) {
+      items.push({
+        type: "markdown",
+        markdown: payload.markdown.trimEnd()
+      } satisfies MarkdownOutputItem);
     }
 
     for (const plotPath of payload.plots) {
@@ -635,6 +643,7 @@ function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
     stdout: (sections.get("STDOUT") ?? []).join("\n"),
     stderr: (sections.get("STDERR") ?? []).join("\n"),
     html: (sections.get("HTML") ?? []).join("\n"),
+    markdown: (sections.get("MARKDOWN") ?? []).join("\n"),
     plots: (sections.get("PLOTS") ?? []).filter((entry) => entry.trim().length > 0)
   };
 }

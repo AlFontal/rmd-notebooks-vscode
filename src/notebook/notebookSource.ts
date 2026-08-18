@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import { parseExecutableChunks } from "../document/chunkParser";
 import { parseChunkOptions } from "./chunkOptions";
 import { parseFrontmatter } from "./frontmatter";
+import { parseInlineRExpressions } from "./inlineR";
 import { getInlineChunksMetadata, withInlineChunksMetadata } from "./notebookTypes";
 
 const DECODER = new TextDecoder();
@@ -71,6 +72,14 @@ export function serializeNotebookSource(data: vscode.NotebookData): Uint8Array {
       continue;
     }
 
+    if (metadata?.kind === "inline") {
+      const markup = normalizeMarkupSource(cell.value);
+      if (markup.length > 0) {
+        blocks.push(markup);
+      }
+      continue;
+    }
+
     if (cell.kind === vscode.NotebookCellKind.Markup) {
       const markup = normalizeMarkupSource(cell.value);
       if (markup.length > 0) {
@@ -91,6 +100,20 @@ export function serializeNotebookSource(data: vscode.NotebookData): Uint8Array {
 
 function pushMarkupCell(cells: vscode.NotebookCellData[], value: string): void {
   if (value.trim().length === 0) {
+    return;
+  }
+
+  const inlineExpressions = parseInlineRExpressions(value);
+  if (inlineExpressions.length > 0) {
+    const inlineCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, value, "markdown");
+    inlineCell.metadata = withInlineChunksMetadata(inlineCell.metadata, {
+      kind: "inline",
+      expressionCount: inlineExpressions.length
+    });
+    inlineCell.outputs = [
+      new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(value, "text/markdown")])
+    ];
+    cells.push(inlineCell);
     return;
   }
 

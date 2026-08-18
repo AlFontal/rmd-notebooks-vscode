@@ -74,11 +74,17 @@ export interface HtmlOutputItem {
   html: string;
 }
 
+export interface MarkdownOutputItem {
+  type: "markdown";
+  markdown: string;
+}
+
 export type OutputItem =
   | TextOutputItem
   | ErrorOutputItem
   | ImageOutputItem
-  | HtmlOutputItem;
+  | HtmlOutputItem
+  | MarkdownOutputItem;
 
 export type ChunkOutputStatus = "running" | "success" | "error" | "redirected" | "cancelled";
 
@@ -96,4 +102,5 @@ export interface ChunkOutputRecord {
   stale: boolean;
   status: ChunkOutputStatus;
   outputs: OutputItem[];
+  sourceKind?: "chunk" | "inline";
 }

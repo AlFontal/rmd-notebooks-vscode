@@ -9,4 +9,8 @@ describe("package manifest", () => {
   it("makes Rmd Notebooks the default editor for contributed notebook files", () => {
     assert.equal(packageJson.contributes.notebooks[0].priority, "default");
   });
+
+  it("contributes an inline R execution command", () => {
+    assert.ok(packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.runInlineCell"));
+  });
 });

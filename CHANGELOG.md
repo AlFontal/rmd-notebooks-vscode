@@ -3,6 +3,7 @@
 ## Unreleased
 
 - show document frontmatter as an editable, syntax-highlighted YAML cell without making it executable (#19)
+- evaluate native knitr and Quarto inline R expressions in rendered, source-preserving prose cells (#20)
 
 ## 0.4.1
 
