@@ -14,13 +14,13 @@ describe("package manifest", () => {
     assert.ok(packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.runInlineCell"));
   });
 
-  it("contributes HTML preview without duplicating Quarto's notebook button", () => {
+  it("contributes HTML preview for both Rmd and qmd notebooks", () => {
     assert.ok(packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.previewHtml"));
     const previewMenus = packageJson.contributes.menus["notebook/toolbar"].filter(
       (entry) => entry.command === "rmdNotebooks.previewHtml"
     );
     assert.equal(previewMenus.length, 2);
     assert.ok(previewMenus.some((entry) => entry.when.includes("resourceExtname =~")));
-    assert.ok(previewMenus.some((entry) => entry.when.includes("!rmdNotebooks.quartoExtensionInstalled")));
+    assert.ok(previewMenus.some((entry) => entry.when.endsWith("resourceExtname == .qmd")));
   });
 });

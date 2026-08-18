@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import { registerCommands } from "./commands/registerCommands";
-import { updatePreviewIntegrationContexts } from "./commands/previewHtml";
 import { OutputChannelController } from "./editor/outputChannelController";
 import { ExecutorRegistry } from "./execution/executorRegistry";
 import { RExecutor } from "./execution/rExecutor";
@@ -64,11 +63,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
     vscode.notebooks.registerNotebookCellStatusBarItemProvider(INLINE_CHUNKS_NOTEBOOK_TYPE, cellStatusBarProvider),
     notebookRuntime,
     ...registerCommands(notebookRuntime),
-    vscode.extensions.onDidChange(() => void updatePreviewIntegrationContexts()),
     new vscode.Disposable(() => void rExecutor.disposeAll())
   );
 
-  await updatePreviewIntegrationContexts();
   await notebookRuntime.initialize();
   const recommendationTimer = setTimeout(() => void maybeRecommendRExtension(context), 2000);
   context.subscriptions.push(new vscode.Disposable(() => clearTimeout(recommendationTimer)));

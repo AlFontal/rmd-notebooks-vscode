@@ -72,14 +72,6 @@ export async function previewNotebookHtml(request: PreviewRequest, services: Pre
   }
 }
 
-export async function updatePreviewIntegrationContexts(): Promise<void> {
-  await vscode.commands.executeCommand(
-    "setContext",
-    "rmdNotebooks.quartoExtensionInstalled",
-    vscode.extensions.getExtension(QUARTO_EXTENSION_ID) !== undefined
-  );
-}
-
 function createPreviewServices(): PreviewServices {
   return {
     ensureIntegration: async (extensionId, commandId, displayName) => {
