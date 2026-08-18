@@ -11,6 +11,12 @@ export function registerCommands(controller: InlineChunksNotebookRuntime): vscod
     vscode.commands.registerCommand("rmdNotebooks.runAllChunks", async (documentUri?: string) => {
       await controller.runAllChunks(documentUri);
     }),
+    vscode.commands.registerCommand(
+      "rmdNotebooks.runInlineCell",
+      async (documentUri?: string, chunkId?: string, cellIndex?: number) => {
+        await controller.runInlineCell(documentUri, chunkId, cellIndex);
+      }
+    ),
     vscode.commands.registerCommand("rmdNotebooks.interruptSession", async (documentUri?: string) => {
       await controller.interruptSession(documentUri);
     }),

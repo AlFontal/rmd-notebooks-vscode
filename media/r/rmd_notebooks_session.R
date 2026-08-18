@@ -35,6 +35,14 @@ rmd_notebooks_render_html <- function(value) {
   NULL
 }
 
+rmd_notebooks_render_markdown <- function(value) {
+  if (inherits(value, "rmd_notebooks_markdown")) {
+    return(value$markdown)
+  }
+
+  NULL
+}
+
 rmd_notebooks_escape_html <- function(text) {
   text <- as.character(text)
   text <- gsub("&", "&amp;", text, fixed = TRUE)
@@ -425,6 +433,7 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
   stdout_buffer <- character()
   stderr_buffer <- character()
   html_buffer <- character()
+  markdown_buffer <- character()
   stdout_connection <- textConnection("stdout_buffer", "w", local = TRUE)
   stderr_connection <- textConnection("stderr_buffer", "w", local = TRUE)
   assign("active_stdout_connection", stdout_connection, envir = protocol_env)
@@ -452,14 +461,19 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
       for (expression in expressions) {
         result <- withVisible(eval(expression, envir = user_env))
         if (result$visible && !is.null(result$value)) {
-          html_output <- rmd_notebooks_render_html(result$value)
-          if (is.null(html_output) && isTRUE(df_render) && is.data.frame(result$value)) {
-            html_output <- rmd_notebooks_data_frame_to_html(result$value, df_max_rows, df_max_columns)
-          }
-          if (!is.null(html_output)) {
-            html_buffer <- c(html_buffer, html_output)
+          markdown_output <- rmd_notebooks_render_markdown(result$value)
+          if (!is.null(markdown_output)) {
+            markdown_buffer <- c(markdown_buffer, markdown_output)
           } else {
-            print(result$value)
+            html_output <- rmd_notebooks_render_html(result$value)
+            if (is.null(html_output) && isTRUE(df_render) && is.data.frame(result$value)) {
+              html_output <- rmd_notebooks_data_frame_to_html(result$value, df_max_rows, df_max_columns)
+            }
+            if (!is.null(html_output)) {
+              html_buffer <- c(html_buffer, html_output)
+            } else {
+              print(result$value)
+            }
           }
         }
       }
@@ -494,6 +508,7 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
     stdout = stdout_buffer,
     stderr = stderr_buffer,
     html = html_buffer,
+    markdown = markdown_buffer,
     plots = rmd_notebooks_collect_plot_paths(artifact_directory, started_at)
   )
 }
@@ -588,6 +603,7 @@ repeat {
   rmd_notebooks_emit_section("STDOUT", result$stdout)
   rmd_notebooks_emit_section("STDERR", result$stderr)
   rmd_notebooks_emit_section("HTML", result$html)
+  rmd_notebooks_emit_section("MARKDOWN", result$markdown)
   rmd_notebooks_emit_section("PLOTS", result$plots)
   cat("RMD_NOTEBOOKS_RESULT_END\n")
   flush.console()

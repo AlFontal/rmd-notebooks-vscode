@@ -1,0 +1,11 @@
+---
+title: Inline R prose
+output: html_document
+---
+
+```{r setup}
+greeting <- "hello"
+```
+
+The greeting is `r paste(greeting, "world")`; Quarto syntax also works: `{r} nchar(greeting)`.
+

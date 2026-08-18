@@ -108,6 +108,12 @@ function formatOutputs(record: ChunkOutputRecord): string[] {
     if (output.type === "html") {
       lines.push("[html]");
       lines.push(output.html);
+      continue;
+    }
+
+    if (output.type === "markdown") {
+      lines.push("[markdown]");
+      lines.push(output.markdown);
     }
   }
 

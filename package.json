@@ -67,6 +67,10 @@
         "title": "Rmd Notebooks: Run All Chunks"
       },
       {
+        "command": "rmdNotebooks.runInlineCell",
+        "title": "Rmd Notebooks: Run Inline R"
+      },
+      {
         "command": "rmdNotebooks.interruptSession",
         "title": "Stop All Running Chunks",
         "category": "Rmd Notebooks",

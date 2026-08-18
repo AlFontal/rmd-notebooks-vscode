@@ -23,11 +23,13 @@ import {
 } from "./notebookTypes";
 import { applyChunkOptionsToResult, parseChunkOptions } from "./chunkOptions";
 import { buildChunkHeader, extractChunkLabel, normalizeChunkHeaderInfo, validateChunkHeaderInfo } from "./chunkHeader";
+import { buildInlineRExecutionCode, parseInlineRExpressions } from "./inlineR";
 
 interface NotebookChunkCell {
   index: number;
   cell: vscode.NotebookCell;
   chunk: ExecutableChunk;
+  sourceKind: "chunk" | "inline";
 }
 
 interface NotebookSnapshot {
@@ -45,7 +47,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private readonly metadataSyncInFlight = new Set<string>();
   private readonly outputSyncInFlight = new Set<string>();
+  private readonly outputRestorations = new Map<string, Promise<void>>();
+  private readonly inlineStaleTimers = new Map<string, NodeJS.Timeout>();
   private readonly executionAdmissions = new Map<string, Promise<void>>();
+  private readonly collapsedInlineDocuments = new Set<string>();
   // Notebooks whose in-flight Run All / multi-cell run should stop before the next
   // cell. Set by interruptSession ("Stop All"), checked between cells in the run loops.
   private readonly runsToAbort = new Set<string>();
@@ -64,7 +69,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       INLINE_CHUNKS_NOTEBOOK_TYPE,
       "Rmd Notebooks"
     );
-    this.controller.supportedLanguages = ["r"];
+    this.controller.supportedLanguages = ["r", "markdown"];
     this.controller.supportsExecutionOrder = true;
     this.controller.executeHandler = async (cells, notebook) => {
       const documentUri = notebook.uri.toString();
@@ -91,7 +96,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       vscode.workspace.onDidCloseNotebookDocument((notebook) => void this.handleNotebookClosed(notebook)),
       vscode.window.onDidChangeActiveNotebookEditor((editor) => {
         if (editor && isInlineChunksNotebook(editor.notebook)) {
-          void this.restoreOutputsToNotebook(editor.notebook);
+          void this.restoreOutputsToNotebook(editor.notebook)
+            .then(() => this.collapseInlineInputs(editor.notebook))
+            .catch((error) => console.error("Unable to restore Rmd notebook outputs", error));
         }
       })
     );
@@ -102,6 +109,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   }
 
   public async runCurrentChunk(documentUri?: string, chunkId?: string): Promise<void> {
+    const notebook = this.resolveNotebook(documentUri);
+    if (notebook) {
+      await this.promoteSelectedInlineMarkup(notebook);
+    }
     const resolved = await this.resolveCodeCell(documentUri, chunkId);
     if (!resolved) {
       void vscode.window.showWarningMessage("Rmd Notebooks: select an R code cell to run it.");
@@ -109,6 +120,35 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
 
     await this.executeCell(resolved.notebook, resolved.cell);
+    if (getInlineChunksMetadata(resolved.cell.metadata)?.kind === "inline") {
+      await this.collapseInlineInputs(resolved.notebook, [resolved.cell.index], true);
+    }
+  }
+
+  public async runInlineCell(documentUri?: string, chunkId?: string, cellIndex?: number): Promise<void> {
+    const notebook = this.resolveNotebook(documentUri);
+    if (!notebook) {
+      return;
+    }
+
+    if (typeof cellIndex === "number") {
+      await this.promoteInlineMarkupCells(notebook, [cellIndex]);
+      const cell = notebook.cellAt(cellIndex);
+      if (getInlineChunksMetadata(cell.metadata)?.kind === "inline") {
+        await this.executeCell(notebook, cell);
+        await this.collapseInlineInputs(notebook, [cell.index], true);
+        return;
+      }
+    } else {
+      await this.promoteSelectedInlineMarkup(notebook);
+    }
+    const resolved = await this.resolveCodeCell(documentUri, chunkId);
+    if (!resolved || getInlineChunksMetadata(resolved.cell.metadata)?.kind !== "inline") {
+      void vscode.window.showWarningMessage("Rmd Notebooks: select prose containing inline R to run it.");
+      return;
+    }
+    await this.executeCell(resolved.notebook, resolved.cell);
+    await this.collapseInlineInputs(resolved.notebook, [resolved.cell.index], true);
   }
 
   public async runAllChunks(documentUri?: string): Promise<void> {
@@ -117,6 +157,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return;
     }
 
+    await this.promoteInlineMarkupCells(notebook);
     const uri = notebook.uri.toString();
     this.runsToAbort.delete(uri);
     const snapshot = await this.refreshNotebook(notebook);
@@ -130,6 +171,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       }
     }
     this.runsToAbort.delete(uri);
+    await this.collapseInlineInputs(notebook, undefined, true);
   }
 
   // Stops the whole run at once: interrupts the chunk currently running, cancels every
@@ -173,7 +215,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     await this.withOutputSync(resolved.notebook.uri.toString(), async () => {
       const execution = this.controller.createNotebookCellExecution(resolved.notebook.cellAt(entry.index));
       execution.start(Date.now());
-      await execution.clearOutput();
+      if (entry.sourceKind === "inline") {
+        await execution.replaceOutput(createInlineSourceOutputs(resolved.cell.document.getText()));
+      } else {
+        await execution.clearOutput();
+      }
       execution.end(undefined, Date.now());
     });
   }
@@ -197,7 +243,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       for (const entry of snapshot.chunks) {
         const execution = this.controller.createNotebookCellExecution(notebook.cellAt(entry.index));
         execution.start(Date.now());
-        await execution.clearOutput();
+        if (entry.sourceKind === "inline") {
+          await execution.replaceOutput(createInlineSourceOutputs(entry.cell.document.getText()));
+        } else {
+          await execution.clearOutput();
+        }
         execution.end(undefined, Date.now());
       }
     });
@@ -311,6 +361,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   }
 
   public dispose(): void {
+    for (const timer of this.inlineStaleTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.inlineStaleTimers.clear();
     this.disposables.forEach((disposable) => disposable.dispose());
   }
 
@@ -322,6 +376,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     this.controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
     await this.refreshNotebook(notebook);
     await this.restoreOutputsToNotebook(notebook);
+    await this.collapseInlineInputs(notebook);
   }
 
   private async handleNotebookChanged(event: vscode.NotebookDocumentChangeEvent): Promise<void> {
@@ -353,9 +408,27 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       if (changed) {
         await this.outputStore.saveDocumentOutputs(documentUri, outputs);
       }
+      const inlineCleared = clearedCells.filter(
+        (cell) => getInlineChunksMetadata(cell.metadata)?.kind === "inline"
+      );
+      if (inlineCleared.length > 0 && await this.ensureControllerSelected(notebook)) {
+        await this.withOutputSync(documentUri, async () => {
+          for (const cell of inlineCleared) {
+            const execution = this.controller.createNotebookCellExecution(notebook.cellAt(cell.index));
+            execution.start();
+            await execution.replaceOutput(createInlineSourceOutputs(cell.document.getText()));
+            execution.end(undefined);
+          }
+        });
+      }
     }
 
     await this.refreshNotebook(notebook);
+    if (event.cellChanges.some(
+      (change) => change.document !== undefined && getInlineChunksMetadata(change.cell.metadata)?.kind === "inline"
+    )) {
+      this.scheduleInlineOutputRestore(notebook);
+    }
   }
 
   private async handleNotebookClosed(notebook: vscode.NotebookDocument): Promise<void> {
@@ -364,6 +437,13 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
 
     this.snapshots.delete(notebook.uri.toString());
+    this.collapsedInlineDocuments.delete(notebook.uri.toString());
+    this.outputRestorations.delete(notebook.uri.toString());
+    const staleTimer = this.inlineStaleTimers.get(notebook.uri.toString());
+    if (staleTimer) {
+      clearTimeout(staleTimer);
+      this.inlineStaleTimers.delete(notebook.uri.toString());
+    }
     const executor = this.executorRegistry.get("r");
     await executor?.disposeSession?.(notebook.uri.toString());
   }
@@ -372,6 +452,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     if (!isExecutableChunkCell(cell)) {
       return "completed";
     }
+
+    await this.outputRestorations.get(notebook.uri.toString())?.catch(() => undefined);
 
     const releaseAdmission = await this.acquireExecutionAdmission(notebook.uri.toString());
     try {
@@ -395,6 +477,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     const outputs = await this.ensureOutputsLoaded(notebook.uri.toString());
     const executor = this.executorRegistry.get(entry.chunk.language);
     const chunkOptions = getChunkOptions(cell);
+    const isInline = entry.sourceKind === "inline";
     const selected = await this.ensureControllerSelected(notebook);
     if (!selected) {
       return "completed";
@@ -424,7 +507,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     if (chunkOptions?.eval === false) {
       beginExecutionDisplay(Date.now());
-      const skippedRecord = createRecord(entry.chunk, "success", []);
+      const skippedRecord = createRecord(entry.chunk, "success", [], entry.sourceKind);
       outputs.set(entry.chunk.identity.chunkId, skippedRecord);
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
       await this.withOutputSync(notebook.uri.toString(), async () => {
@@ -438,11 +521,12 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     if (!executor) {
       beginExecutionDisplay(Date.now());
       const record = createRecord(entry.chunk, "error", [
+        ...(isInline ? inlineSourceOutputItems(cell.document.getText()) : []),
         {
           type: "error",
           text: `No executor registered for language "${entry.chunk.language}".`
         }
-      ]);
+      ], entry.sourceKind);
       outputs.set(entry.chunk.identity.chunkId, record);
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
       await this.withOutputSync(notebook.uri.toString(), async () => {
@@ -453,7 +537,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return "completed";
     }
 
-    const runningRecord = createRecord(entry.chunk, "running", []);
+    const runningRecord = createRecord(entry.chunk, "running", [], entry.sourceKind);
     outputs.set(entry.chunk.identity.chunkId, runningRecord);
     await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
     this.outputChannelController.logRunStarted(cell.document, entry.chunk);
@@ -464,10 +548,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         workspaceFolder: vscode.workspace.getWorkspaceFolder(notebook.uri)?.uri.fsPath,
         chunkId: entry.chunk.identity.chunkId,
         language: entry.chunk.language,
-        code: cell.document.getText(),
+        code: isInline ? buildInlineRExecutionCode(cell.document.getText()) : cell.document.getText(),
         header: entry.chunk.header,
         artifactDirectory: await this.outputStore.getArtifactDirectory(notebook.uri.toString()),
-        plot: resolvePlotRenderOptions(chunkOptions),
+        plot: isInline ? undefined : resolvePlotRenderOptions(chunkOptions),
         prompt: (request) => this.promptForChunkInput(notebook, cell, entry.chunk, request),
         onStart: (executionOrder) => beginExecutionDisplay(Date.now(), executionOrder),
         token: execution.token
@@ -475,14 +559,17 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       releaseAdmission();
       const result = await resultPromise;
 
-      const filteredResult = applyChunkOptionsToResult(result, chunkOptions);
+      const filteredResult = isInline ? result : applyChunkOptionsToResult(result, chunkOptions);
+      const displayedResult = isInline && !filteredResult.success && !filteredResult.items.some((item) => item.type === "markdown")
+        ? { ...filteredResult, items: [...inlineSourceOutputItems(cell.document.getText()), ...filteredResult.items] }
+        : filteredResult;
       // onStart always fires (in the session's beginExecution) before any result can
       // arrive, so the cell is already marked running here; this call is only a
       // fallback for the impossible case where onStart was skipped, and is a no-op
       // otherwise. The displayed start time therefore comes from onStart (Date.now at
       // dequeue), not from filteredResult.startedAt.
-      beginExecutionDisplay(filteredResult.startedAt);
-      const record = createRecordFromResult(entry.chunk, filteredResult);
+      beginExecutionDisplay(displayedResult.startedAt);
+      const record = createRecordFromResult(entry.chunk, displayedResult, entry.sourceKind);
       outputs.set(entry.chunk.identity.chunkId, record);
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
       await this.withOutputSync(notebook.uri.toString(), async () => {
@@ -492,7 +579,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
           await execution.replaceOutput(await createNotebookOutputs(record));
         }
       });
-      execution.end(filteredResult.success, filteredResult.finishedAt);
+      execution.end(displayedResult.success, displayedResult.finishedAt);
       this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
       return "completed";
     } catch (error) {
@@ -500,6 +587,20 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         // The chunk did start running (it timed out mid-execution), so the cell is
         // already showing as running by now; this only matters as a safeguard.
         beginExecutionDisplay(Date.now());
+        if (isInline) {
+          const record = createRecord(entry.chunk, "error", [
+            ...inlineSourceOutputItems(cell.document.getText()),
+            { type: "error", text: error.message }
+          ], "inline");
+          outputs.set(entry.chunk.identity.chunkId, record);
+          await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
+          await this.withOutputSync(notebook.uri.toString(), async () => {
+            await execution.replaceOutput(await createNotebookOutputs(record));
+          });
+          execution.end(false, Date.now());
+          this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
+          return "completed";
+        }
         const fallback = await this.handleInteractiveFallback(notebook, cell, entry.chunk, outputs, execution, error.message);
         this.outputChannelController.logRunCompleted(cell.document, entry.chunk, fallback.record);
         return fallback.launchedTerminal ? "redirected" : "completed";
@@ -511,11 +612,20 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         // duration (start() must be called before end(), but with no start time so
         // no clock is shown), and clear it without flagging it as a failure.
         beginExecutionDisplay(undefined);
-        const cancelledRecord = createRecord(entry.chunk, "cancelled", []);
+        const cancelledRecord = createRecord(
+          entry.chunk,
+          "cancelled",
+          isInline ? inlineSourceOutputItems(cell.document.getText()) : [],
+          entry.sourceKind
+        );
         outputs.set(entry.chunk.identity.chunkId, cancelledRecord);
         await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
         await this.withOutputSync(notebook.uri.toString(), async () => {
-          await execution.clearOutput();
+          if (isInline) {
+            await execution.replaceOutput(await createNotebookOutputs(cancelledRecord));
+          } else {
+            await execution.clearOutput();
+          }
         });
         execution.end(undefined, Date.now());
         this.outputChannelController.logRunCompleted(cell.document, entry.chunk, cancelledRecord);
@@ -524,11 +634,12 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
       beginExecutionDisplay(Date.now());
       const record = createRecord(entry.chunk, "error", [
+        ...(isInline ? inlineSourceOutputItems(cell.document.getText()) : []),
         {
           type: "error",
           text: error instanceof Error ? error.message : String(error)
         }
-      ]);
+      ], entry.sourceKind);
       outputs.set(entry.chunk.identity.chunkId, record);
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
       await this.withOutputSync(notebook.uri.toString(), async () => {
@@ -567,7 +678,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
   public async runCurrentChunkInTerminal(documentUri?: string, chunkId?: string): Promise<void> {
     const resolved = await this.resolveCodeCell(documentUri, chunkId);
-    if (!resolved) {
+    if (!resolved || getInlineChunksMetadata(resolved.cell.metadata)?.kind !== "code") {
       void vscode.window.showWarningMessage("Rmd Notebooks: select an R code cell to run it in the terminal.");
       return;
     }
@@ -664,6 +775,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     for (const entry of snapshot.chunks) {
       const existing = getInlineChunksMetadata(entry.cell.metadata);
+      if (entry.sourceKind === "inline" && existing?.kind === "inline") {
+        continue;
+      }
 
       const targetSource: InlineChunksCodeCellMetadata = {
         kind: "code",
@@ -697,7 +811,40 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     return true;
   }
 
-  private async restoreOutputsToNotebook(notebook: vscode.NotebookDocument): Promise<void> {
+  private restoreOutputsToNotebook(notebook: vscode.NotebookDocument): Promise<void> {
+    const documentUri = notebook.uri.toString();
+    const previous = this.outputRestorations.get(documentUri) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(() => this.performOutputRestore(notebook));
+    this.outputRestorations.set(documentUri, current);
+    const cleanup = (): void => {
+      if (this.outputRestorations.get(documentUri) === current) {
+        this.outputRestorations.delete(documentUri);
+      }
+    };
+    void current.then(cleanup, cleanup);
+    return current;
+  }
+
+  private scheduleInlineOutputRestore(notebook: vscode.NotebookDocument): void {
+    const documentUri = notebook.uri.toString();
+    const existing = this.inlineStaleTimers.get(documentUri);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      this.inlineStaleTimers.delete(documentUri);
+      if (vscode.workspace.notebookDocuments.some((candidate) => candidate.uri.toString() === documentUri)) {
+        void this.restoreOutputsToNotebook(notebook).catch((error) =>
+          console.error("Unable to refresh stale inline R output", error)
+        );
+      }
+    }, 250);
+    this.inlineStaleTimers.set(documentUri, timer);
+  }
+
+  private async performOutputRestore(notebook: vscode.NotebookDocument): Promise<void> {
     // On a window reload a notebook can become the active editor before its
     // snapshot has been built (the active-editor event races with initialize),
     // so build it on demand instead of bailing out and never restoring.
@@ -713,10 +860,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     const pending = snapshot.chunks.filter((entry) => {
       const record = outputs.get(entry.chunk.identity.chunkId);
-      if (!record) {
+      if (!record || record.status === "running") {
         return false;
       }
-      return notebook.cellAt(entry.index).outputs.length === 0;
+      return entry.sourceKind === "inline" || notebook.cellAt(entry.index).outputs.length === 0;
     });
     if (pending.length === 0) {
       return;
@@ -742,6 +889,73 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         execution.end(record.status === "success");
       }
     });
+  }
+
+  private async promoteSelectedInlineMarkup(notebook: vscode.NotebookDocument): Promise<void> {
+    const editor = vscode.window.activeNotebookEditor;
+    if (!editor || editor.notebook.uri.toString() !== notebook.uri.toString()) {
+      return;
+    }
+    const indices: number[] = [];
+    for (let index = editor.selection.start; index < editor.selection.end; index += 1) {
+      indices.push(index);
+    }
+    await this.promoteInlineMarkupCells(notebook, indices);
+  }
+
+  private async promoteInlineMarkupCells(notebook: vscode.NotebookDocument, indices?: number[]): Promise<void> {
+    const allowed = indices ? new Set(indices) : undefined;
+    const edits: vscode.NotebookEdit[] = [];
+
+    for (const cell of notebook.getCells()) {
+      if (cell.kind !== vscode.NotebookCellKind.Markup || (allowed && !allowed.has(cell.index))) {
+        continue;
+      }
+      const expressions = parseInlineRExpressions(cell.document.getText());
+      if (expressions.length === 0) {
+        continue;
+      }
+      const replacement = createInlineCellData(cell.document.getText(), expressions.length);
+      edits.push(vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(cell.index, cell.index + 1), [replacement]));
+    }
+
+    if (edits.length === 0) {
+      return;
+    }
+    await this.withMetadataSync(notebook.uri.toString(), async () => {
+      const edit = new vscode.WorkspaceEdit();
+      edit.set(notebook.uri, edits);
+      await vscode.workspace.applyEdit(edit);
+    });
+    await this.refreshNotebook(notebook);
+  }
+
+  private async collapseInlineInputs(
+    notebook: vscode.NotebookDocument,
+    indices?: number[],
+    force = false
+  ): Promise<void> {
+    const documentUri = notebook.uri.toString();
+    if (!force && this.collapsedInlineDocuments.has(documentUri)) {
+      return;
+    }
+    if (!vscode.window.visibleNotebookEditors.some((editor) => editor.notebook.uri.toString() === documentUri)) {
+      return;
+    }
+    const allowed = indices ? new Set(indices) : undefined;
+    const ranges = notebook.getCells()
+      .filter((cell) => getInlineChunksMetadata(cell.metadata)?.kind === "inline" && (!allowed || allowed.has(cell.index)))
+      .map((cell) => ({ start: cell.index, end: cell.index + 1 }));
+    if (ranges.length === 0) {
+      return;
+    }
+    await vscode.commands.executeCommand("notebook.cell.collapseCellInput", {
+      document: notebook.uri,
+      ranges
+    });
+    if (!indices) {
+      this.collapsedInlineDocuments.add(documentUri);
+    }
   }
 
   private resolveNotebook(documentUri?: string): vscode.NotebookDocument | undefined {
@@ -949,6 +1163,7 @@ function buildNotebookSnapshot(
     .map((cell) => ({
       cell,
       index: cell.index,
+      sourceKind: getInlineChunksMetadata(cell.metadata)?.kind === "inline" ? "inline" as const : "chunk" as const,
       parsed: toParsedChunk(notebook, cell)
     }));
 
@@ -981,7 +1196,8 @@ function buildNotebookSnapshot(
     chunks: codeCells.map((entry, index) => ({
       index: entry.index,
       cell: entry.cell,
-      chunk: chunks[index]
+      chunk: chunks[index],
+      sourceKind: entry.sourceKind
     })),
     generatedAt: Date.now()
   };
@@ -997,8 +1213,9 @@ function isExecutableChunkCell(cell: vscode.NotebookCell): boolean {
 
 function toParsedChunk(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell): ParsedExecutableChunk {
   const metadata = getInlineChunksMetadata(cell.metadata);
+  const isInline = metadata?.kind === "inline";
   const codeMetadata = metadata?.kind === "code" ? metadata : undefined;
-  const header = codeMetadata?.header ?? `\`\`\`{${cell.document.languageId}}`;
+  const header = isInline ? "inline-r" : codeMetadata?.header ?? `\`\`\`{${cell.document.languageId}}`;
   const body = cell.document.getText();
   const startLine = cell.index * 2;
   const bodyLineCount = body.length === 0 ? 0 : body.replace(/\r\n/g, "\n").split("\n").length;
@@ -1006,9 +1223,9 @@ function toParsedChunk(notebook: vscode.NotebookDocument, cell: vscode.NotebookC
 
   return {
     documentUri: notebook.uri.toString(),
-    language: cell.document.languageId,
+    language: isInline ? "r" : cell.document.languageId,
     header,
-    headerInfo: codeMetadata?.headerInfo ?? cell.document.languageId,
+    headerInfo: isInline ? "r inline" : codeMetadata?.headerInfo ?? cell.document.languageId,
     label: codeMetadata?.label,
     body,
     isClosed: true,
@@ -1052,6 +1269,7 @@ function reconcileOutputs(snapshot: NotebookSnapshot, outputs: Map<string, Chunk
     record.headerHash = entry.chunk.identity.headerHash;
     record.bodyHash = entry.chunk.identity.bodyHash;
     record.stale = record.contentHash !== entry.chunk.identity.contentHash;
+    record.sourceKind = entry.sourceKind;
   }
 
   for (const [chunkId, record] of outputs) {
@@ -1061,7 +1279,12 @@ function reconcileOutputs(snapshot: NotebookSnapshot, outputs: Map<string, Chunk
   }
 }
 
-function createRecord(chunk: ExecutableChunk, status: ChunkOutputRecord["status"], outputs: ChunkOutputRecord["outputs"]): ChunkOutputRecord {
+function createRecord(
+  chunk: ExecutableChunk,
+  status: ChunkOutputRecord["status"],
+  outputs: ChunkOutputRecord["outputs"],
+  sourceKind: "chunk" | "inline" = "chunk"
+): ChunkOutputRecord {
   return {
     documentUri: chunk.documentUri,
     chunkId: chunk.identity.chunkId,
@@ -1075,11 +1298,16 @@ function createRecord(chunk: ExecutableChunk, status: ChunkOutputRecord["status"
     capturedAt: Date.now(),
     stale: false,
     status,
-    outputs
+    outputs,
+    sourceKind
   };
 }
 
-function createRecordFromResult(chunk: ExecutableChunk, result: ExecutionResult): ChunkOutputRecord {
+function createRecordFromResult(
+  chunk: ExecutableChunk,
+  result: ExecutionResult,
+  sourceKind: "chunk" | "inline" = "chunk"
+): ChunkOutputRecord {
   return {
     documentUri: chunk.documentUri,
     chunkId: chunk.identity.chunkId,
@@ -1093,7 +1321,8 @@ function createRecordFromResult(chunk: ExecutableChunk, result: ExecutionResult)
     capturedAt: result.finishedAt,
     stale: false,
     status: result.success ? "success" : "error",
-    outputs: result.items
+    outputs: result.items,
+    sourceKind
   };
 }
 
@@ -1128,11 +1357,30 @@ async function toNotebookOutput(item: OutputItem): Promise<vscode.NotebookCellOu
     return new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(item.html, "text/html")]);
   }
 
+  if (item.type === "markdown") {
+    return new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(item.markdown, "text/markdown")]);
+  }
+
   const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(item.path));
   return new vscode.NotebookCellOutput([
     new vscode.NotebookCellOutputItem(bytes, item.mimeType),
     vscode.NotebookCellOutputItem.text(path.basename(item.path))
   ]);
+}
+
+function inlineSourceOutputItems(source: string): ChunkOutputRecord["outputs"] {
+  return [{ type: "markdown", markdown: source }];
+}
+
+function createInlineSourceOutputs(source: string): vscode.NotebookCellOutput[] {
+  return [new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(source, "text/markdown")])];
+}
+
+function createInlineCellData(source: string, expressionCount: number): vscode.NotebookCellData {
+  const cell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, source, "markdown");
+  cell.metadata = withInlineChunksMetadata(cell.metadata, { kind: "inline", expressionCount });
+  cell.outputs = createInlineSourceOutputs(source);
+  return cell;
 }
 
 function ensureTrailingNewline(value: string): string {

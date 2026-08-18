@@ -40,6 +40,7 @@ The VS Code Marketplace package installs the [vscode-R extension](https://market
 - Evaluates inline chunks in `.GlobalEnv`, so user variables are normal R workspace variables
 - Honors normal R startup files by default, including project `.Rprofile` files used by tools such as `renv`
 - Shows inline stdout, stderr, HTML snippets, static PNG plots, and theme-aware data-frame tables
+- Evaluates native knitr and Quarto inline R expressions inside rendered prose cells
 - Shows execution-order badges per notebook and resets them when its R session restarts
 - Persists outputs and restores them when the document is reopened
 - Marks outputs stale after code edits
@@ -85,6 +86,7 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 
 - `Rmd Notebooks: Run Current Chunk`
 - `Rmd Notebooks: Run All Chunks`
+- `Rmd Notebooks: Run Inline R`
 - `Rmd Notebooks: Stop All Running Chunks`
 - `Rmd Notebooks: Clear Current Output`
 - `Rmd Notebooks: Clear All Outputs`
@@ -116,6 +118,8 @@ Inline R sessions honor normal startup files by default. To isolate inline sessi
   "rmdNotebooks.r.args": ["--slave", "--vanilla"]
 }
 ```
+
+Rendered prose supports both native knitr syntax, such as `` `r value` ``, and Quarto syntax, such as `` `{r} value` ``. Inline prose requires the R package `knitr`; install it with `install.packages("knitr")` if it is not already available. Inline results are textual/Markdown values; plots and rich widgets remain regular chunk outputs.
 
 ## Development
 
