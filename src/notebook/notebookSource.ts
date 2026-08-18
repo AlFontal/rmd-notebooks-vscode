@@ -2,6 +2,7 @@ import { TextDecoder, TextEncoder } from "node:util";
 import * as vscode from "vscode";
 import { parseExecutableChunks } from "../document/chunkParser";
 import { parseChunkOptions } from "./chunkOptions";
+import { parseFrontmatter } from "./frontmatter";
 import { getInlineChunksMetadata, withInlineChunksMetadata } from "./notebookTypes";
 
 const DECODER = new TextDecoder();
@@ -13,7 +14,19 @@ export function deserializeNotebookSource(content: Uint8Array): vscode.NotebookD
   const lines = normalized.length === 0 ? [] : normalized.split("\n");
   const chunks = parseExecutableChunks("", normalized);
   const cells: vscode.NotebookCellData[] = [];
+  const frontmatter = parseFrontmatter(normalized);
   let cursor = 0;
+
+  if (frontmatter) {
+    const frontmatterCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, frontmatter.body, "yaml");
+    frontmatterCell.metadata = withInlineChunksMetadata(frontmatterCell.metadata, {
+      kind: "frontmatter",
+      openingFence: frontmatter.openingFence,
+      closingFence: frontmatter.closingFence
+    });
+    cells.push(frontmatterCell);
+    cursor = frontmatter.endLine + 1;
+  }
 
   for (const chunk of chunks) {
     const before = lines.slice(cursor, chunk.startLine).join("\n");
@@ -47,6 +60,17 @@ export function serializeNotebookSource(data: vscode.NotebookData): Uint8Array {
   const blocks: string[] = [];
 
   for (const cell of data.cells) {
+    const metadata = getInlineChunksMetadata(cell.metadata ?? {});
+    if (metadata?.kind === "frontmatter") {
+      const body = normalizeMarkupSource(cell.value);
+      blocks.push(
+        body.length > 0
+          ? `${metadata.openingFence}\n${body}\n${metadata.closingFence}`
+          : `${metadata.openingFence}\n${metadata.closingFence}`
+      );
+      continue;
+    }
+
     if (cell.kind === vscode.NotebookCellKind.Markup) {
       const markup = normalizeMarkupSource(cell.value);
       if (markup.length > 0) {
@@ -55,7 +79,6 @@ export function serializeNotebookSource(data: vscode.NotebookData): Uint8Array {
       continue;
     }
 
-    const metadata = getInlineChunksMetadata(cell.metadata ?? {});
     const header = buildHeader(cell.languageId, metadata);
     const closingFence = "`".repeat(Math.max(3, metadata?.kind === "code" ? metadata.fenceLength : 3));
     const body = cell.value.replace(/\r\n/g, "\n").replace(/\n+$/g, "");

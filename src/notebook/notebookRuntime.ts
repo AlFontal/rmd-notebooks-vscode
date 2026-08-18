@@ -369,7 +369,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   }
 
   private async executeCell(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell): Promise<ExecuteCellOutcome> {
-    if (cell.kind !== vscode.NotebookCellKind.Code) {
+    if (!isExecutableChunkCell(cell)) {
       return "completed";
     }
 
@@ -788,13 +788,13 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     for (let index = selection.start; index < selection.end; index += 1) {
       const cell = notebook.cellAt(index);
-      if (cell.kind === vscode.NotebookCellKind.Code) {
+      if (isExecutableChunkCell(cell)) {
         return { notebook, cell };
       }
     }
 
     const activeCell = notebook.cellAt(Math.min(selection.start, Math.max(notebook.cellCount - 1, 0)));
-    return activeCell.kind === vscode.NotebookCellKind.Code ? { notebook, cell: activeCell } : undefined;
+    return isExecutableChunkCell(activeCell) ? { notebook, cell: activeCell } : undefined;
   }
 
   private async ensureOutputsLoaded(documentUri: string): Promise<Map<string, ChunkOutputRecord>> {
@@ -945,7 +945,7 @@ function buildNotebookSnapshot(
 ): NotebookSnapshot {
   const codeCells = notebook
     .getCells()
-    .filter((cell) => cell.kind === vscode.NotebookCellKind.Code)
+    .filter(isExecutableChunkCell)
     .map((cell) => ({
       cell,
       index: cell.index,
@@ -985,6 +985,14 @@ function buildNotebookSnapshot(
     })),
     generatedAt: Date.now()
   };
+}
+
+function isExecutableChunkCell(cell: vscode.NotebookCell): boolean {
+  if (cell.kind !== vscode.NotebookCellKind.Code) {
+    return false;
+  }
+
+  return getInlineChunksMetadata(cell.metadata)?.kind !== "frontmatter";
 }
 
 function toParsedChunk(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell): ParsedExecutableChunk {
