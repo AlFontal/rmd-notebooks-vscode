@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- execute `{python}` chunks in persistent per-document Python sessions, with automatic Python-environment discovery in the standard kernel picker plus IPython magics, top-level await, `display()`, rich formatters, Matplotlib and Plotnine plots, display updates, prompts, cancellation, and session restart support (#27)
+
 ## 0.5.0
 
 - show document frontmatter as an editable, syntax-highlighted YAML cell without making it executable (#19)

@@ -114,6 +114,12 @@ function formatOutputs(record: ChunkOutputRecord): string[] {
     if (output.type === "markdown") {
       lines.push("[markdown]");
       lines.push(output.markdown);
+      continue;
+    }
+
+    if (output.type === "mime") {
+      lines.push(`[${output.mimeType}]`);
+      lines.push(output.data);
     }
   }
 

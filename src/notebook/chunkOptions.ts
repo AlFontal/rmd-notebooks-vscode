@@ -90,7 +90,11 @@ export function applyChunkOptionsToResult(result: ExecutionResult, options: Chun
       return false;
     }
 
-    if (result.success && options.results === "hide" && (item.type === "text" || item.type === "html")) {
+    if (
+      result.success &&
+      options.results === "hide" &&
+      (item.type === "text" || item.type === "html" || item.type === "markdown" || item.type === "mime")
+    ) {
       return false;
     }
 

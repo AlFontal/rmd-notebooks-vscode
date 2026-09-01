@@ -33,6 +33,10 @@ interface InlineChunksExtensionApi {
       description?: string;
     }>;
   }>;
+  getPythonEnvironmentState(documentUri: string): {
+    environments: Array<{ id: string; path: string; label: string }>;
+    selectedPath?: string;
+  };
 }
 
 let extensionApi: InlineChunksExtensionApi;
@@ -295,6 +299,184 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.equal(state.snapshot?.chunkIds.length, 3);
     assert.ok(state.outputs.some((record) => record.outputTypes.includes("text")));
     assert.match(state.outputChannelText, /integration\.rmd[\s\S]*\[stdout\][\s\S]*\[1\] 2/i);
+  });
+
+  it("runs Python chunks in a persistent qmd session and renders rich output", async () => {
+    await writeFixture(
+      "python-integration.qmd",
+      [
+        "# Python integration",
+        "",
+        "```{python setup}",
+        "shared_value = 40",
+        "print('python ready')",
+        "```",
+        "",
+        "```{python dependent}",
+        "print(f'answer={shared_value + 2}')",
+        "```",
+        "",
+        "```{python rich}",
+        "class RichValue:",
+        "    def _repr_html_(self):",
+        "        return '<strong>python html</strong>'",
+        "RichValue()",
+        "```",
+        "",
+        "```{python mimebundle}",
+        "import base64",
+        "class MimeBundlePlot:",
+        "    def _repr_mimebundle_(self):",
+        "        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z2S8AAAAASUVORK5CYII=')",
+        "        return ({'image/png': png}, {'image/png': {'width': 1, 'height': 1}})",
+        "MimeBundlePlot()",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-integration.qmd");
+    const pythonCells = editor.notebook.getCells().filter((cell) => cell.document.languageId === "python");
+    assert.equal(pythonCells.length, 4);
+
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.filter((record) => record.status === "success").length === 4
+    );
+
+    assert.ok(state.outputChannelText.includes("python ready"));
+    assert.ok(state.outputChannelText.includes("answer=42"));
+    assert.ok(state.outputs.some((record) => record.outputTypes.includes("html")));
+    assert.ok(state.outputs.some((record) => record.outputTypes.includes("image")));
+
+    const richCell = pythonCells[2];
+    const renderedRichCell = await waitForNotebookOutput(richCell, (cell) =>
+      cell.outputs.some((output) => output.items.some((item) => item.mime === "text/html"))
+    );
+    assert.ok(notebookOutputText(renderedRichCell, "text/html").includes("python html"));
+    assert.equal(await waitForExecutionOrder(editor.notebook.uri, pythonCells[0].index), 1);
+    assert.equal(await waitForExecutionOrder(editor.notebook.uri, pythonCells[2].index), 3);
+
+    const environmentState = extensionApi.getPythonEnvironmentState(editor.notebook.uri.toString());
+    assert.ok(environmentState.environments.length > 0, "Expected Python extension environment discovery.");
+    assert.ok(environmentState.selectedPath, "Expected the preferred Python environment to be selected.");
+    assert.ok(
+      environmentState.environments.some((environment) => environment.path === environmentState.selectedPath),
+      `Selected interpreter was not one of the discovered environments: ${environmentState.selectedPath}`
+    );
+
+    await waitForNotebookOutput(pythonCells[3], (cell) =>
+      cell.outputs.some((output) => output.items.some((item) => item.mime === "image/png"))
+    );
+
+    assert.ok(await editor.notebook.save());
+    const saved = Buffer.from(await vscode.workspace.fs.readFile(editor.notebook.uri)).toString("utf8");
+    assert.ok(saved.includes("```{python setup}"));
+    assert.ok(saved.includes("shared_value = 40"));
+  });
+
+  it("handles Python input() through the notebook prompt UI", async () => {
+    await writeFixture(
+      "python-input.qmd",
+      [
+        "# Python input",
+        "",
+        "```{python prompt}",
+        "package = input('Package name? ')",
+        "print(f'value={package}')",
+        "```",
+        ""
+      ].join("\n")
+    );
+    extensionApi.setTestPromptResponses([{ value: "polars" }]);
+
+    const editor = await openNotebookEditor("python-input.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success" && record.outputTypes.includes("text"))
+    );
+    const requests = extensionApi.takeTestPromptRequests();
+    assert.ok(requests.some((request) => request.kind === "input" && request.prompt.includes("Package name?")));
+    assert.ok(state.outputChannelText.includes("value=polars"));
+  });
+
+  it("restarts the per-document Python session", async () => {
+    await writeFixture(
+      "python-restart.qmd",
+      [
+        "# Python restart",
+        "",
+        "```{python assigner}",
+        "python_restart_value = 41",
+        "```",
+        "",
+        "```{python reader}",
+        "python_restart_value + 1",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-restart.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success")
+    );
+
+    await vscode.commands.executeCommand("rmdNotebooks.restartSession");
+    editor.selection = singleCellRange(findLastCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "error")
+    );
+    assert.ok(state.outputChannelText.includes("NameError"));
+  });
+
+  it("interrupts Python execution and keeps the session usable", async () => {
+    await writeFixture(
+      "python-interrupt.qmd",
+      [
+        "# Python interrupt",
+        "",
+        "```{python slow}",
+        "import time",
+        "time.sleep(10)",
+        "print('should not finish')",
+        "```",
+        "",
+        "```{python recovery}",
+        "print('python recovered')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-interrupt.qmd");
+    const uri = editor.notebook.uri.toString();
+    const initial = await extensionApi.getDocumentState(uri);
+    const [slowId, recoveryId] = initial.snapshot?.chunkIds ?? [];
+    assert.ok(slowId && recoveryId);
+
+    const slowRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, slowId);
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === slowId && record.status === "running")
+    );
+    await vscode.commands.executeCommand("rmdNotebooks.interruptSession", uri);
+    await slowRun;
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === slowId && record.status === "cancelled")
+    );
+
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, recoveryId);
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === recoveryId && record.status === "success")
+    );
+    assert.ok(state.outputChannelText.includes("python recovered"));
+    assert.ok(!state.outputChannelText.includes("should not finish"));
   });
 
   it("runs an html-producing qmd cell and renders html inline", async () => {
@@ -1925,6 +2107,9 @@ async function resetTestSettings(): Promise<void> {
   await updateTestSetting("r.args", undefined);
   await updateTestSetting("r.sourceVscodeRSessionWatcher", false);
   await updateTestSetting("r.startupTimeoutMs", undefined);
+  await updateTestSetting("python.path", undefined);
+  await updateTestSetting("python.args", undefined);
+  await updateTestSetting("python.startupTimeoutMs", undefined);
   await updateTestSetting("execution.interactiveFallbackTimeoutMs", 0);
   await updateTestSetting("execution.interactiveFallbackBehavior", "prompt");
   await updateTestSetting("output.dataFrameRender", undefined);

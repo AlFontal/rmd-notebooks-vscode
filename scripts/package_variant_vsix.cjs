@@ -48,6 +48,14 @@ function assertDependencyPolicy(vsixPath) {
   if (variant === "openvsx" && hasRExtensionDependency) {
     throw new Error("Open VSX VSIX must not hard-depend on REditorSupport.r");
   }
+
+  const extensionPack = manifest.extensionPack || [];
+  if (variant === "marketplace" && !extensionPack.includes("ms-python.python")) {
+    throw new Error("Marketplace VSIX must include ms-python.python in extensionPack");
+  }
+  if (variant === "openvsx" && extensionPack.includes("ms-python.python")) {
+    throw new Error("Open VSX VSIX must not include the Marketplace-only Python extension pack entry");
+  }
 }
 
 const outputFile = outputName();
@@ -56,6 +64,7 @@ const manifest = JSON.parse(originalPackageText);
 
 if (variant === "openvsx") {
   delete manifest.extensionDependencies;
+  delete manifest.extensionPack;
 }
 
 fs.rmSync(outputPath, { force: true });

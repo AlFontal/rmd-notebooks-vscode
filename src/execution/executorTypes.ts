@@ -46,11 +46,11 @@ export interface ExecutionContext {
   artifactDirectory?: string;
   plot?: PlotRenderOptions;
   prompt?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>;
-  // Invoked when the chunk leaves the queue and actually begins running in the R
+  // Invoked when the chunk leaves the queue and actually begins running in its
   // session, so the caller can flip the cell from "queued" to "running" only then.
-  // Receives this run's execution count: a per-session, 1-based number that lives on
-  // the R session, so it is scoped to the notebook and resets to 1 when the session
-  // restarts (the [1] [2] [3] badge VS Code shows next to each cell).
+  // Receives this run's execution count: a per-language-session, 1-based number, so
+  // it is scoped to the notebook and resets to 1 when that session restarts (the
+  // [1] [2] [3] badge VS Code shows next to each cell).
   onStart?: (executionOrder: number) => void;
   // Cancels just this chunk: if it is still queued it is dropped from the queue; if
   // it is the one currently running it is interrupted. Other chunks are unaffected.
@@ -71,4 +71,5 @@ export interface Executor {
   executeChunk(context: ExecutionContext): Promise<ExecutionResult>;
   interruptSession?(documentUri: string): Promise<void>;
   disposeSession?(documentUri: string): Promise<void>;
+  disposeAll?(): Promise<void>;
 }

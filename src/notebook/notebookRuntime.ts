@@ -13,7 +13,10 @@ import {
 } from "../execution/executorTypes";
 import { CancelledExecutionError, InteractiveExecutionError } from "../execution/executionErrors";
 import { RTerminalRunner } from "../execution/rTerminalRunner";
+import { PythonExecutor } from "../execution/pythonExecutor";
+import type { PythonEnvironmentControllerHost, PythonEnvironmentDescriptor } from "../integration/pythonEnvironmentDiscovery";
 import { OutputStore } from "../persistence/outputStore";
+import { sha1 } from "../util/hash";
 import {
   getInlineChunksMetadata,
   INLINE_CHUNKS_NOTEBOOK_TYPE,
@@ -41,13 +44,20 @@ interface NotebookSnapshot {
 
 type ExecuteCellOutcome = "completed" | "redirected";
 
-export class InlineChunksNotebookRuntime implements vscode.Disposable {
+interface ControllerRegistration {
+  controller: vscode.NotebookController;
+  environment?: PythonEnvironmentDescriptor;
+  selectionListener: vscode.Disposable;
+}
+
+export class InlineChunksNotebookRuntime implements vscode.Disposable, PythonEnvironmentControllerHost {
   private readonly snapshots = new Map<string, NotebookSnapshot>();
   private readonly outputsByDocument = new Map<string, Map<string, ChunkOutputRecord>>();
   private readonly disposables: vscode.Disposable[] = [];
   private readonly metadataSyncInFlight = new Set<string>();
   private readonly outputSyncInFlight = new Set<string>();
   private readonly outputRestorations = new Map<string, Promise<void>>();
+  private readonly notebookInitializations = new Map<string, Promise<void>>();
   private readonly inlineStaleTimers = new Map<string, NodeJS.Timeout>();
   private readonly executionAdmissions = new Map<string, Promise<void>>();
   private readonly collapsedInlineDocuments = new Set<string>();
@@ -56,32 +66,23 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private readonly runsToAbort = new Set<string>();
   private testPromptResponses: InteractivePromptResponse[] = [];
   private readonly testPromptRequests: InteractivePromptRequest[] = [];
-  private readonly controller: vscode.NotebookController;
+  private readonly controllers = new Map<string, ControllerRegistration>();
+  private readonly environmentControllerIds = new Map<string, string>();
+  private readonly selectedControllers = new Map<string, vscode.NotebookController>();
+  private readonly preferredControllers = new Map<string, vscode.NotebookController>();
+  private readonly defaultController: vscode.NotebookController;
 
   public constructor(
     private readonly outputStore: OutputStore,
     private readonly executorRegistry: ExecutorRegistry,
     private readonly outputChannelController: OutputChannelController,
-    private readonly terminalRunner: RTerminalRunner
+    private readonly terminalRunner: RTerminalRunner,
+    private readonly pythonExecutor: PythonExecutor
   ) {
-    this.controller = vscode.notebooks.createNotebookController(
+    this.defaultController = this.createController(
       "rmd-notebooks-vscode-controller",
-      INLINE_CHUNKS_NOTEBOOK_TYPE,
       "Rmd Notebooks"
     );
-    this.controller.supportedLanguages = ["r", "markdown"];
-    this.controller.supportsExecutionOrder = true;
-    this.controller.executeHandler = async (cells, notebook) => {
-      const documentUri = notebook.uri.toString();
-      this.runsToAbort.delete(documentUri);
-      for (const cell of cells) {
-        if (this.runsToAbort.has(documentUri)) {
-          break;
-        }
-        await this.executeCell(notebook, cell);
-      }
-      this.runsToAbort.delete(documentUri);
-    };
     // No interruptHandler on purpose: with one, VS Code never fires per-cell
     // cancellation tokens (it would interrupt the whole session instead). Relying on
     // the tokens lets stopping one cell cancel just that cell, while leaving the
@@ -90,8 +91,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
   public async initialize(): Promise<void> {
     this.disposables.push(
-      this.controller,
-      vscode.workspace.onDidOpenNotebookDocument((notebook) => void this.handleNotebookOpened(notebook)),
+      vscode.workspace.onDidOpenNotebookDocument((notebook) => void this.beginNotebookInitialization(notebook)),
       vscode.workspace.onDidChangeNotebookDocument((event) => void this.handleNotebookChanged(event)),
       vscode.workspace.onDidCloseNotebookDocument((notebook) => void this.handleNotebookClosed(notebook)),
       vscode.window.onDidChangeActiveNotebookEditor((editor) => {
@@ -104,24 +104,147 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     );
 
     for (const notebook of vscode.workspace.notebookDocuments) {
-      await this.handleNotebookOpened(notebook);
+      await this.beginNotebookInitialization(notebook);
     }
+  }
+
+  public syncPythonEnvironments(environments: readonly PythonEnvironmentDescriptor[]): void {
+    const liveEnvironmentIds = new Set(environments.map((environment) => environment.id));
+
+    for (const environment of environments) {
+      const existingControllerId = this.environmentControllerIds.get(environment.id);
+      const existing = existingControllerId ? this.controllers.get(existingControllerId) : undefined;
+      if (existing) {
+        existing.environment = environment;
+        existing.controller.label = environment.label;
+        existing.controller.description = `Rmd Notebooks · ${environment.description ?? "Python"}`;
+        existing.controller.detail = environment.detail;
+        continue;
+      }
+
+      const controllerId = `rmd-notebooks-python-${sha1(environment.id).slice(0, 16)}`;
+      const controller = this.createController(controllerId, environment.label, environment);
+      controller.description = `Rmd Notebooks · ${environment.description ?? "Python"}`;
+      controller.detail = environment.detail;
+      this.environmentControllerIds.set(environment.id, controllerId);
+    }
+
+    for (const [environmentId, controllerId] of [...this.environmentControllerIds]) {
+      if (liveEnvironmentIds.has(environmentId)) {
+        continue;
+      }
+      this.environmentControllerIds.delete(environmentId);
+      this.disposeController(controllerId);
+    }
+  }
+
+  public setPreferredPythonEnvironment(notebook: vscode.NotebookDocument, environmentId?: string): void {
+    const controllerId = environmentId ? this.environmentControllerIds.get(environmentId) : undefined;
+    const preferred = controllerId ? this.controllers.get(controllerId)?.controller : this.defaultController;
+    if (!preferred) {
+      return;
+    }
+
+    if (this.preferredControllers.get(notebook.uri.toString()) === preferred) {
+      return;
+    }
+    this.preferredControllers.set(notebook.uri.toString(), preferred);
+    for (const registration of this.controllers.values()) {
+      registration.controller.updateNotebookAffinity(
+        notebook,
+        registration.controller === preferred
+          ? vscode.NotebookControllerAffinity.Preferred
+          : vscode.NotebookControllerAffinity.Default
+      );
+    }
+  }
+
+  private createController(
+    id: string,
+    label: string,
+    environment?: PythonEnvironmentDescriptor
+  ): vscode.NotebookController {
+    const controller = vscode.notebooks.createNotebookController(id, INLINE_CHUNKS_NOTEBOOK_TYPE, label);
+    controller.supportedLanguages = ["r", "python", "markdown"];
+    controller.supportsExecutionOrder = true;
+    controller.executeHandler = async (cells, notebook, selectedController) => {
+      await this.activateControllerForNotebook(notebook, selectedController);
+      const documentUri = notebook.uri.toString();
+      this.runsToAbort.delete(documentUri);
+      for (const cell of cells) {
+        if (this.runsToAbort.has(documentUri)) {
+          break;
+        }
+        await this.executeCell(notebook, cell, cell.index, selectedController);
+      }
+      this.runsToAbort.delete(documentUri);
+    };
+
+    const selectionListener = controller.onDidChangeSelectedNotebooks((event) => {
+      const documentUri = event.notebook.uri.toString();
+      if (event.selected) {
+        void this.activateControllerForNotebook(event.notebook, controller);
+      } else if (this.selectedControllers.get(documentUri) === controller) {
+        this.selectedControllers.delete(documentUri);
+      }
+    });
+    this.controllers.set(id, { controller, environment, selectionListener });
+    return controller;
+  }
+
+  private disposeController(controllerId: string): void {
+    const registration = this.controllers.get(controllerId);
+    if (!registration || registration.controller === this.defaultController) {
+      return;
+    }
+    this.controllers.delete(controllerId);
+    registration.selectionListener.dispose();
+    registration.controller.dispose();
+
+    for (const [documentUri, controller] of [...this.selectedControllers]) {
+      if (controller === registration.controller) {
+        this.selectedControllers.delete(documentUri);
+      }
+    }
+    for (const [documentUri, controller] of [...this.preferredControllers]) {
+      if (controller === registration.controller) {
+        this.preferredControllers.set(documentUri, this.defaultController);
+      }
+    }
+  }
+
+  private async activateControllerForNotebook(
+    notebook: vscode.NotebookDocument,
+    controller: vscode.NotebookController
+  ): Promise<void> {
+    this.selectedControllers.set(notebook.uri.toString(), controller);
+    const environment = this.controllers.get(controller.id)?.environment;
+    await this.pythonExecutor.selectInterpreter(
+      notebook.uri.toString(),
+      environment
+        ? {
+            id: environment.id,
+            path: environment.interpreterPath
+          }
+        : undefined
+    );
   }
 
   public async runCurrentChunk(documentUri?: string, chunkId?: string): Promise<void> {
     const notebook = this.resolveNotebook(documentUri);
+    const selection = notebook ? this.getNotebookSelection(notebook) : undefined;
     if (notebook) {
       await this.promoteSelectedInlineMarkup(notebook);
     }
-    const resolved = await this.resolveCodeCell(documentUri, chunkId);
+    const resolved = await this.resolveCodeCell(documentUri, chunkId, selection);
     if (!resolved) {
       void vscode.window.showWarningMessage("Rmd Notebooks: select an R code cell to run it.");
       return;
     }
 
-    await this.executeCell(resolved.notebook, resolved.cell);
+    await this.executeCell(resolved.notebook, resolved.cell, resolved.cellIndex);
     if (getInlineChunksMetadata(resolved.cell.metadata)?.kind === "inline") {
-      await this.collapseInlineInputs(resolved.notebook, [resolved.cell.index], true);
+      await this.collapseInlineInputs(resolved.notebook, [resolved.cellIndex], true);
     }
   }
 
@@ -135,7 +258,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       await this.promoteInlineMarkupCells(notebook, [cellIndex]);
       const cell = notebook.cellAt(cellIndex);
       if (getInlineChunksMetadata(cell.metadata)?.kind === "inline") {
-        await this.executeCell(notebook, cell);
+        await this.executeCell(notebook, cell, cellIndex);
         await this.collapseInlineInputs(notebook, [cell.index], true);
         return;
       }
@@ -147,8 +270,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       void vscode.window.showWarningMessage("Rmd Notebooks: select prose containing inline R to run it.");
       return;
     }
-    await this.executeCell(resolved.notebook, resolved.cell);
-    await this.collapseInlineInputs(resolved.notebook, [resolved.cell.index], true);
+    await this.executeCell(resolved.notebook, resolved.cell, resolved.cellIndex);
+    await this.collapseInlineInputs(resolved.notebook, [resolved.cellIndex], true);
   }
 
   public async runAllChunks(documentUri?: string): Promise<void> {
@@ -165,7 +288,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       if (this.runsToAbort.has(uri)) {
         break;
       }
-      const outcome = await this.executeCell(notebook, entry.cell);
+      const outcome = await this.executeCell(notebook, entry.cell, entry.index);
       if (outcome === "redirected") {
         break;
       }
@@ -188,8 +311,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     // chunk is ever in the session queue; failQueue + SIGINT alone would stop that one
     // cell and let the loop march on. This flag makes the loop bail out too.
     this.runsToAbort.add(notebook.uri.toString());
-    const executor = this.executorRegistry.get("r");
-    await executor?.interruptSession?.(notebook.uri.toString());
+    await Promise.all(
+      this.executorRegistry.all().map((executor) => executor.interruptSession?.(notebook.uri.toString()))
+    );
   }
 
   public async clearCurrentOutput(documentUri?: string, chunkId?: string): Promise<void> {
@@ -208,12 +332,12 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     const outputs = await this.ensureOutputsLoaded(resolved.notebook.uri.toString());
     outputs.delete(entry.chunk.identity.chunkId);
     await this.outputStore.saveDocumentOutputs(resolved.notebook.uri.toString(), outputs);
-    const selected = await this.ensureControllerSelected(resolved.notebook);
-    if (!selected) {
+    const selectedController = await this.ensureControllerSelected(resolved.notebook);
+    if (!selectedController) {
       return;
     }
     await this.withOutputSync(resolved.notebook.uri.toString(), async () => {
-      const execution = this.controller.createNotebookCellExecution(resolved.notebook.cellAt(entry.index));
+      const execution = selectedController.createNotebookCellExecution(resolved.notebook.cellAt(entry.index));
       execution.start(Date.now());
       if (entry.sourceKind === "inline") {
         await execution.replaceOutput(createInlineSourceOutputs(resolved.cell.document.getText()));
@@ -234,14 +358,14 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     const outputs = await this.ensureOutputsLoaded(notebook.uri.toString());
     outputs.clear();
     await this.outputStore.clearDocumentOutputs(notebook.uri.toString());
-    const selected = await this.ensureControllerSelected(notebook);
-    if (!selected) {
+    const selectedController = await this.ensureControllerSelected(notebook);
+    if (!selectedController) {
       return;
     }
 
     await this.withOutputSync(notebook.uri.toString(), async () => {
       for (const entry of snapshot.chunks) {
-        const execution = this.controller.createNotebookCellExecution(notebook.cellAt(entry.index));
+        const execution = selectedController.createNotebookCellExecution(notebook.cellAt(entry.index));
         execution.start(Date.now());
         if (entry.sourceKind === "inline") {
           await execution.replaceOutput(createInlineSourceOutputs(entry.cell.document.getText()));
@@ -256,6 +380,22 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   public getChunkIdForCell(documentUri: string, cellIndex: number): string | undefined {
     const snapshot = this.snapshots.get(documentUri);
     return snapshot?.chunks.find((entry) => entry.index === cellIndex)?.chunk.identity.chunkId;
+  }
+
+  public getPythonEnvironmentState(documentUri: string): {
+    environments: Array<{ id: string; path: string; label: string }>;
+    selectedPath?: string;
+  } {
+    return {
+      environments: [...this.controllers.values()]
+        .flatMap((registration) => registration.environment ? [registration.environment] : [])
+        .map((environment) => ({
+          id: environment.id,
+          path: environment.interpreterPath,
+          label: environment.label
+        })),
+      selectedPath: this.pythonExecutor.getSelectedInterpreter(documentUri)?.path
+    };
   }
 
   public async getDocumentState(documentUri: string): Promise<{
@@ -366,6 +506,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
     this.inlineStaleTimers.clear();
     this.disposables.forEach((disposable) => disposable.dispose());
+    for (const registration of this.controllers.values()) {
+      registration.selectionListener.dispose();
+      registration.controller.dispose();
+    }
+    this.controllers.clear();
   }
 
   private async handleNotebookOpened(notebook: vscode.NotebookDocument): Promise<void> {
@@ -373,10 +518,29 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return;
     }
 
-    this.controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
+    const preferred = this.preferredControllers.get(notebook.uri.toString()) ?? this.defaultController;
+    preferred.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
     await this.refreshNotebook(notebook);
     await this.restoreOutputsToNotebook(notebook);
     await this.collapseInlineInputs(notebook);
+  }
+
+  private beginNotebookInitialization(notebook: vscode.NotebookDocument): Promise<void> {
+    const documentUri = notebook.uri.toString();
+    const existing = this.notebookInitializations.get(documentUri);
+    if (existing) {
+      return existing;
+    }
+
+    const current = this.handleNotebookOpened(notebook);
+    this.notebookInitializations.set(documentUri, current);
+    const cleanup = (): void => {
+      if (this.notebookInitializations.get(documentUri) === current) {
+        this.notebookInitializations.delete(documentUri);
+      }
+    };
+    void current.then(cleanup, cleanup);
+    return current;
   }
 
   private async handleNotebookChanged(event: vscode.NotebookDocumentChangeEvent): Promise<void> {
@@ -411,10 +575,13 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       const inlineCleared = clearedCells.filter(
         (cell) => getInlineChunksMetadata(cell.metadata)?.kind === "inline"
       );
-      if (inlineCleared.length > 0 && await this.ensureControllerSelected(notebook)) {
+      const selectedController = inlineCleared.length > 0
+        ? await this.ensureControllerSelected(notebook)
+        : undefined;
+      if (inlineCleared.length > 0 && selectedController) {
         await this.withOutputSync(documentUri, async () => {
           for (const cell of inlineCleared) {
-            const execution = this.controller.createNotebookCellExecution(notebook.cellAt(cell.index));
+            const execution = selectedController.createNotebookCellExecution(notebook.cellAt(cell.index));
             execution.start();
             await execution.replaceOutput(createInlineSourceOutputs(cell.document.getText()));
             execution.end(undefined);
@@ -437,6 +604,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
 
     this.snapshots.delete(notebook.uri.toString());
+    this.selectedControllers.delete(notebook.uri.toString());
+    this.preferredControllers.delete(notebook.uri.toString());
+    this.notebookInitializations.delete(notebook.uri.toString());
     this.collapsedInlineDocuments.delete(notebook.uri.toString());
     this.outputRestorations.delete(notebook.uri.toString());
     const staleTimer = this.inlineStaleTimers.get(notebook.uri.toString());
@@ -444,12 +614,29 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       clearTimeout(staleTimer);
       this.inlineStaleTimers.delete(notebook.uri.toString());
     }
-    const executor = this.executorRegistry.get("r");
-    await executor?.disposeSession?.(notebook.uri.toString());
+    await this.pythonExecutor.selectInterpreter(notebook.uri.toString());
+    await Promise.all(
+      this.executorRegistry.all().map((executor) => executor.disposeSession?.(notebook.uri.toString()))
+    );
   }
 
-  private async executeCell(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell): Promise<ExecuteCellOutcome> {
-    if (!isExecutableChunkCell(cell)) {
+  private async executeCell(
+    notebook: vscode.NotebookDocument,
+    cell: vscode.NotebookCell,
+    targetIndex = cell.index,
+    controller?: vscode.NotebookController
+  ): Promise<ExecuteCellOutcome> {
+    const cellIndex = targetIndex;
+    await this.notebookInitializations.get(notebook.uri.toString())?.catch(() => undefined);
+
+    // Output restoration can cause VS Code to replace NotebookCell objects while a
+    // command is being resolved. Re-read the cell by index so a stale object cannot
+    // make an executable code cell look like markup and silently skip the run.
+    if (cellIndex < 0 || cellIndex >= notebook.cellCount) {
+      return "completed";
+    }
+    const currentCell = notebook.cellAt(cellIndex);
+    if (!isExecutableChunkCell(currentCell)) {
       return "completed";
     }
 
@@ -457,7 +644,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     const releaseAdmission = await this.acquireExecutionAdmission(notebook.uri.toString());
     try {
-      return await this.executeAdmittedCell(notebook, cell, releaseAdmission);
+      return await this.executeAdmittedCell(notebook, currentCell, releaseAdmission, controller);
     } finally {
       releaseAdmission();
     }
@@ -466,34 +653,38 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private async executeAdmittedCell(
     notebook: vscode.NotebookDocument,
     cell: vscode.NotebookCell,
-    releaseAdmission: () => void
+    releaseAdmission: () => void,
+    requestedController?: vscode.NotebookController
   ): Promise<ExecuteCellOutcome> {
     const snapshot = await this.refreshNotebook(notebook);
     const entry = snapshot.chunks.find((candidate) => candidate.index === cell.index);
     if (!entry) {
       return "completed";
     }
+    cell = notebook.cellAt(entry.index);
 
     const outputs = await this.ensureOutputsLoaded(notebook.uri.toString());
     const executor = this.executorRegistry.get(entry.chunk.language);
     const chunkOptions = getChunkOptions(cell);
     const isInline = entry.sourceKind === "inline";
-    const selected = await this.ensureControllerSelected(notebook);
-    if (!selected) {
+    const selectedController = requestedController ?? await this.ensureControllerSelected(notebook);
+    if (!selectedController) {
       return "completed";
     }
-    const execution = this.controller.createNotebookCellExecution(notebook.cellAt(entry.index));
+    await this.activateControllerForNotebook(notebook, selectedController);
+    const execution = selectedController.createNotebookCellExecution(notebook.cellAt(entry.index));
     // Leave the cell in the "queued" (pending clock) state until the chunk actually
-    // begins running in R, instead of marking it running the moment it is enqueued.
+    // begins running in its language session, instead of marking it running the
+    // moment it is enqueued.
     // That way every cell's reported duration is its own run time, not the time since
     // the first queued chunk started, and cells waiting their turn show the queued
     // badge rather than a spinner, exactly like Run All. start() must precede end(),
-    // so paths that never reach R still call this before ending the execution.
+    // so paths that never reach an executor still call this before ending the execution.
     let executionStarted = false;
-    // The execution order (the [N] badge) is the R session's own per-notebook count,
-    // delivered through onStart when the chunk actually starts running in R. Chunks
-    // that never reach R (eval=FALSE, no executor) leave it undefined and so show no
-    // number, the way a chunk that did not run has no count.
+    // The execution order (the [N] badge) is the language session's own per-notebook
+    // count, delivered through onStart when the chunk actually starts running. Chunks
+    // that never reach an executor (eval=FALSE, no executor) leave it undefined and
+    // so show no number, the way a chunk that did not run has no count.
     const beginExecutionDisplay = (startTime?: number, executionOrder?: number): void => {
       if (executionStarted) {
         return;
@@ -683,6 +874,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return;
     }
 
+    if (resolved.cell.document.languageId.toLowerCase() !== "r") {
+      void vscode.window.showWarningMessage("Rmd Notebooks: terminal fallback is currently available only for R chunks.");
+      return;
+    }
+
     await this.terminalRunner.runChunk(
       resolved.cell.document.getText(),
       vscode.workspace.getWorkspaceFolder(resolved.notebook.uri)?.uri.fsPath
@@ -692,18 +888,18 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   public async restartSession(documentUri?: string): Promise<void> {
     const notebook = this.resolveNotebook(documentUri);
     if (!notebook) {
-      void vscode.window.showWarningMessage("Rmd Notebooks: open a notebook to restart its R session.");
+      void vscode.window.showWarningMessage("Rmd Notebooks: open a notebook to restart its execution sessions.");
       return;
     }
 
-    const executor = this.executorRegistry.get("r");
-    if (!executor?.disposeSession) {
-      void vscode.window.showWarningMessage("Rmd Notebooks: no restartable R session is available.");
+    const restartableExecutors = this.executorRegistry.all().filter((executor) => executor.disposeSession);
+    if (restartableExecutors.length === 0) {
+      void vscode.window.showWarningMessage("Rmd Notebooks: no restartable execution session is available.");
       return;
     }
 
-    await executor.disposeSession(notebook.uri.toString());
-    void vscode.window.setStatusBarMessage("Rmd Notebooks: restarted R session", 2500);
+    await Promise.all(restartableExecutors.map((executor) => executor.disposeSession?.(notebook.uri.toString())));
+    void vscode.window.setStatusBarMessage("Rmd Notebooks: restarted execution sessions", 2500);
   }
 
   private async promptForChunkInput(
@@ -811,12 +1007,19 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     return true;
   }
 
-  private restoreOutputsToNotebook(notebook: vscode.NotebookDocument): Promise<void> {
+  private restoreOutputsToNotebook(notebook: vscode.NotebookDocument, refreshAfterCurrent = false): Promise<void> {
     const documentUri = notebook.uri.toString();
-    const previous = this.outputRestorations.get(documentUri) ?? Promise.resolve();
-    const current = previous
-      .catch(() => undefined)
-      .then(() => this.performOutputRestore(notebook));
+    const existing = this.outputRestorations.get(documentUri);
+    if (existing && !refreshAfterCurrent) {
+      return existing;
+    }
+
+    // Opening a notebook and making it active can request the same restore twice.
+    // Coalesce those calls so VS Code never gets overlapping controller executions
+    // for the same cells. Inline-source edits opt into one follow-up pass instead.
+    const current = existing
+      ? existing.catch(() => undefined).then(() => this.performOutputRestore(notebook))
+      : this.performOutputRestore(notebook);
     this.outputRestorations.set(documentUri, current);
     const cleanup = (): void => {
       if (this.outputRestorations.get(documentUri) === current) {
@@ -836,7 +1039,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     const timer = setTimeout(() => {
       this.inlineStaleTimers.delete(documentUri);
       if (vscode.workspace.notebookDocuments.some((candidate) => candidate.uri.toString() === documentUri)) {
-        void this.restoreOutputsToNotebook(notebook).catch((error) =>
+        void this.restoreOutputsToNotebook(notebook, true).catch((error) =>
           console.error("Unable to refresh stale inline R output", error)
         );
       }
@@ -869,8 +1072,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return;
     }
 
-    const selected = await this.ensureControllerSelected(notebook);
-    if (!selected) {
+    const selectedController = await this.ensureControllerSelected(notebook);
+    if (!selectedController) {
       return;
     }
     await this.withOutputSync(notebook.uri.toString(), async () => {
@@ -880,7 +1083,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
           continue;
         }
 
-        const execution = this.controller.createNotebookCellExecution(notebook.cellAt(entry.index));
+        const execution = selectedController.createNotebookCellExecution(notebook.cellAt(entry.index));
         // Restoring previously captured output is not a real run, so omit the
         // timestamps: passing capturedAt (in the past) as the end time made
         // VS Code render a negative duration like "-50.-4s".
@@ -983,32 +1186,42 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
   private async resolveCodeCell(
     documentUri?: string,
-    chunkId?: string
-  ): Promise<{ notebook: vscode.NotebookDocument; cell: vscode.NotebookCell } | undefined> {
+    chunkId?: string,
+    preferredSelection?: vscode.NotebookRange
+  ): Promise<{ notebook: vscode.NotebookDocument; cell: vscode.NotebookCell; cellIndex: number } | undefined> {
     const notebook = this.resolveNotebook(documentUri);
     if (!notebook) {
       return undefined;
     }
 
+    // Capture the user's target before refresh/restore work yields. Restoring saved
+    // outputs can move VS Code's notebook selection while a command is starting;
+    // reading it afterward can silently run (or reject) a different cell.
+    const selection = preferredSelection ?? this.getNotebookSelection(notebook);
     const snapshot = await this.refreshNotebook(notebook);
     if (chunkId) {
       const entry = snapshot.chunks.find((candidate) => candidate.chunk.identity.chunkId === chunkId);
-      return entry ? { notebook, cell: entry.cell } : undefined;
+      return entry ? { notebook, cell: notebook.cellAt(entry.index), cellIndex: entry.index } : undefined;
     }
-
-    const selection = vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString()
-      ? vscode.window.activeNotebookEditor.selection
-      : new vscode.NotebookRange(0, 1);
 
     for (let index = selection.start; index < selection.end; index += 1) {
       const cell = notebook.cellAt(index);
       if (isExecutableChunkCell(cell)) {
-        return { notebook, cell };
+        return { notebook, cell, cellIndex: index };
       }
     }
 
     const activeCell = notebook.cellAt(Math.min(selection.start, Math.max(notebook.cellCount - 1, 0)));
-    return isExecutableChunkCell(activeCell) ? { notebook, cell: activeCell } : undefined;
+    return isExecutableChunkCell(activeCell)
+      ? { notebook, cell: activeCell, cellIndex: activeCell.index }
+      : undefined;
+  }
+
+  private getNotebookSelection(notebook: vscode.NotebookDocument): vscode.NotebookRange {
+    const activeEditor = vscode.window.activeNotebookEditor;
+    return activeEditor?.notebook.uri.toString() === notebook.uri.toString()
+      ? activeEditor.selection
+      : new vscode.NotebookRange(0, 1);
   }
 
   private async ensureOutputsLoaded(documentUri: string): Promise<Map<string, ChunkOutputRecord>> {
@@ -1040,18 +1253,28 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
   }
 
-  private async ensureControllerSelected(notebook: vscode.NotebookDocument): Promise<boolean> {
+  private async ensureControllerSelected(
+    notebook: vscode.NotebookDocument
+  ): Promise<vscode.NotebookController | undefined> {
     const activeEditor = vscode.window.activeNotebookEditor;
     if (!activeEditor || activeEditor.notebook.uri.toString() !== notebook.uri.toString()) {
-      return false;
+      return undefined;
     }
 
+    const documentUri = notebook.uri.toString();
+    const selected = this.selectedControllers.get(documentUri);
+    if (selected) {
+      await this.activateControllerForNotebook(notebook, selected);
+      return selected;
+    }
+
+    const controller = this.preferredControllers.get(documentUri) ?? this.defaultController;
     await vscode.commands.executeCommand("_notebook.selectKernel", {
-      id: this.controller.id,
+      id: controller.id,
       extension: "AlFontal.rmd-notebooks-vscode"
     });
-
-    return true;
+    await this.activateControllerForNotebook(notebook, controller);
+    return controller;
   }
 
   private async handleInteractiveFallback(
@@ -1359,6 +1582,11 @@ async function toNotebookOutput(item: OutputItem): Promise<vscode.NotebookCellOu
 
   if (item.type === "markdown") {
     return new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(item.markdown, "text/markdown")]);
+  }
+
+  if (item.type === "mime") {
+    const bytes = Buffer.from(item.data, item.encoding === "base64" ? "base64" : "utf8");
+    return new vscode.NotebookCellOutput([new vscode.NotebookCellOutputItem(bytes, item.mimeType)]);
   }
 
   const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(item.path));

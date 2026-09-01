@@ -1,7 +1,7 @@
 {
   "name": "rmd-notebooks-vscode",
   "displayName": "Rmd Notebooks for VS Code",
-  "description": "Open .Rmd and .qmd files as runnable R notebooks in VS Code and Positron.",
+  "description": "Open .Rmd and .qmd files as runnable R and Python notebooks in VS Code and Positron.",
   "version": "0.5.0",
   "publisher": "AlFontal",
   "author": "Alejandro Fontal",
@@ -13,6 +13,9 @@
   },
   "extensionDependencies": [
     "REditorSupport.r"
+  ],
+  "extensionPack": [
+    "ms-python.python"
   ],
   "bugs": {
     "url": "https://github.com/AlFontal/rmd-notebooks-vscode/issues"
@@ -26,6 +29,8 @@
   ],
   "keywords": [
     "r",
+    "python",
+    "ipython",
     "rmarkdown",
     "quarto",
     "qmd",
@@ -86,7 +91,7 @@
       },
       {
         "command": "rmdNotebooks.restartSession",
-        "title": "Restart R Session",
+        "title": "Restart Execution Sessions",
         "icon": "$(debug-restart)"
       },
       {
@@ -185,6 +190,27 @@
           "minimum": 1000,
           "description": "How long to wait (in milliseconds) for an inline R session to finish starting before reporting a startup timeout. Increase this for projects with slow R startup, e.g. renv autoloading, a heavy .Rprofile, or Bioconductor."
         },
+        "rmdNotebooks.python.path": {
+          "type": "string",
+          "default": "",
+          "description": "Fallback Python executable for the base Rmd Notebooks controller. A Python environment selected in the notebook kernel picker takes precedence. When empty, falls back to python3 on macOS/Linux or python on Windows."
+        },
+        "rmdNotebooks.python.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "-u"
+          ],
+          "description": "Arguments passed to the Python executable before starting the persistent chunk-execution session."
+        },
+        "rmdNotebooks.python.startupTimeoutMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 1000,
+          "description": "How long to wait (in milliseconds) for a Python chunk-execution session to start."
+        },
         "rmdNotebooks.execution.interactiveFallbackTimeoutMs": {
           "type": "number",
           "default": 0,
@@ -279,13 +305,16 @@
     "smoke:vscode-r": "Rscript --vanilla scripts/smoke_vscode_r_session_watcher.R"
   },
   "devDependencies": {
-    "@vscode/vsce": "^3.6.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.15.30",
     "@types/vscode": "^1.88.0",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.0",
     "mocha": "^11.2.2",
     "ovsx": "^0.10.9",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@vscode/python-extension": "^1.0.6"
   }
 }

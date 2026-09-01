@@ -79,12 +79,20 @@ export interface MarkdownOutputItem {
   markdown: string;
 }
 
+export interface MimeOutputItem {
+  type: "mime";
+  mimeType: string;
+  data: string;
+  encoding?: "utf8" | "base64";
+}
+
 export type OutputItem =
   | TextOutputItem
   | ErrorOutputItem
   | ImageOutputItem
   | HtmlOutputItem
-  | MarkdownOutputItem;
+  | MarkdownOutputItem
+  | MimeOutputItem;
 
 export type ChunkOutputStatus = "running" | "success" | "error" | "redirected" | "cancelled";
 
