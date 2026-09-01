@@ -16,6 +16,7 @@ import { RTerminalRunner } from "../execution/rTerminalRunner";
 import { PythonExecutor } from "../execution/pythonExecutor";
 import {
   controllerIdForRuntime,
+  filterPythonRuntimes,
   PythonLaunchDescriptor,
   resolvePythonRuntimePreference
 } from "../execution/pythonRuntimeTypes";
@@ -78,6 +79,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private readonly promptedYamlMismatches = new Set<string>();
   private readonly controllerSelectionTransitions = new Map<string, Promise<void>>();
   private readonly defaultController: vscode.NotebookController;
+  private readonly pythonEnvironmentStatus: vscode.StatusBarItem;
 
   public constructor(
     private readonly outputStore: OutputStore,
@@ -92,6 +94,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       "rmd-notebooks-vscode-controller",
       "Rmd Notebooks"
     );
+    this.pythonEnvironmentStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
+    this.pythonEnvironmentStatus.name = "Rmd Notebooks Python Environment";
+    this.pythonEnvironmentStatus.command = "rmdNotebooks.selectPythonEnvironment";
     // No interruptHandler on purpose: with one, VS Code never fires per-cell
     // cancellation tokens (it would interrupt the whole session instead). Relying on
     // the tokens lets stopping one cell cancel just that cell, while leaving the
@@ -104,7 +109,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       vscode.workspace.onDidChangeNotebookDocument((event) => void this.handleNotebookChanged(event)),
       vscode.workspace.onDidCloseNotebookDocument((notebook) => void this.handleNotebookClosed(notebook)),
       vscode.window.onDidChangeActiveNotebookEditor((editor) => {
+        this.updatePythonEnvironmentStatus(editor);
         if (editor && isInlineChunksNotebook(editor.notebook)) {
+          void this.selectPreferredControllerIfNeeded(editor.notebook);
           void this.restoreOutputsToNotebook(editor.notebook)
             .then(() => this.collapseInlineInputs(editor.notebook))
             .catch((error) => console.error("Unable to restore Rmd notebook outputs", error));
@@ -116,11 +123,14 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         this.refreshPythonRuntimeControllers();
         this.logPythonDiscoveryState();
         void this.refreshPythonRuntimePreferences();
+        this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
       }),
       this.pythonExecutor.onDidUsePythonFallback((event) => void this.handleMissingIPython(event))
     );
+    this.disposables.push(this.pythonEnvironmentStatus);
     this.refreshPythonRuntimeControllers();
     this.logPythonDiscoveryState();
+    this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
 
     for (const notebook of vscode.workspace.notebookDocuments) {
       await this.beginNotebookInitialization(notebook);
@@ -197,6 +207,54 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
           : vscode.NotebookControllerAffinity.Default
       );
     }
+    if (vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString()) {
+      this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
+    }
+  }
+
+  private async selectPreferredControllerIfNeeded(notebook: vscode.NotebookDocument): Promise<void> {
+    await this.refreshPythonRuntimePreference(notebook, false);
+    const documentUri = notebook.uri.toString();
+    const preferred = this.preferredControllers.get(documentUri);
+    const selected = this.selectedControllers.get(documentUri);
+    if (!preferred || preferred === this.defaultController || (selected && selected !== this.defaultController)) {
+      return;
+    }
+    await vscode.commands.executeCommand("_notebook.selectKernel", {
+      id: preferred.id,
+      extension: "AlFontal.rmd-notebooks-vscode"
+    });
+    await this.activateControllerForNotebook(notebook, preferred);
+  }
+
+  private updatePythonEnvironmentStatus(editor?: vscode.NotebookEditor): void {
+    if (!editor || !isInlineChunksNotebook(editor.notebook)) {
+      this.pythonEnvironmentStatus.hide();
+      return;
+    }
+    const hasPythonCells = editor.notebook.getCells().some(
+      (cell) =>
+        cell.kind === vscode.NotebookCellKind.Code &&
+        ["python", "py"].includes(cell.document.languageId.toLowerCase())
+    );
+    if (!hasPythonCells) {
+      this.pythonEnvironmentStatus.hide();
+      return;
+    }
+
+    const documentUri = editor.notebook.uri.toString();
+    const selectedController = this.selectedControllers.get(documentUri);
+    const preferredController = this.preferredControllers.get(documentUri);
+    const controller = selectedController && selectedController !== this.defaultController
+      ? selectedController
+      : preferredController;
+    const runtime = controller ? this.controllers.get(controller.id)?.runtime : undefined;
+    const state = this.pythonDiscovery.getState();
+    this.pythonEnvironmentStatus.text = `$(server-environment) Python: ${runtime?.label ?? "Select Environment"}`;
+    this.pythonEnvironmentStatus.tooltip = runtime
+      ? `${runtime.renderPythonPath}\nClick to select another Python environment.`
+      : `${state.environments} environment(s), ${state.kernelspecs} kernelspec(s) discovered. Click to select.`;
+    this.pythonEnvironmentStatus.show();
   }
 
   private async refreshPythonRuntimePreferences(): Promise<void> {
@@ -356,6 +414,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
           }
         : undefined
     );
+    if (vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString()) {
+      this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
+    }
   }
 
   public async selectPythonEnvironment(documentUri?: string): Promise<void> {
@@ -371,23 +432,38 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       runtime?: PythonLaunchDescriptor;
       action?: "refresh" | "path";
     };
-    const items: PickerItem[] = runtimes.map((runtime) => ({
-      label: `${runtime.id === selectedId ? "$(check) " : ""}${runtime.label}`,
-      description: runtime.description,
-      detail: runtime.detail ?? runtime.renderPythonPath,
-      runtime
-    }));
-    items.push(
-      { label: "$(refresh) Refresh Python Environments", action: "refresh" },
-      { label: "$(file-code) Enter Python Executable Path…", action: "path" }
-    );
-
-    const picked = await vscode.window.showQuickPick(items, {
-      title: "Select Python Environment",
-      placeHolder: "Choose the Python runtime for this qmd notebook",
-      matchOnDescription: true,
-      matchOnDetail: true
+    const toItems = (filtered: readonly PythonLaunchDescriptor[]): PickerItem[] => [
+      ...filtered.map((runtime) => ({
+        label: `${runtime.id === selectedId ? "$(check) " : ""}${runtime.label}`,
+        description: runtime.description,
+        detail: runtime.detail ?? runtime.renderPythonPath,
+        runtime
+      })),
+      { label: "$(refresh) Refresh Python Environments", action: "refresh", alwaysShow: true },
+      { label: "$(file-code) Enter Python Executable Path…", action: "path", alwaysShow: true }
+    ];
+    const picker = vscode.window.createQuickPick<PickerItem>();
+    picker.title = "Select Python Environment";
+    picker.placeholder = "Type an environment name, version, manager, or path";
+    picker.matchOnDescription = true;
+    picker.matchOnDetail = true;
+    picker.items = toItems(runtimes);
+    const pickerDisposables: vscode.Disposable[] = [];
+    const picked = await new Promise<PickerItem | undefined>((resolve) => {
+      pickerDisposables.push(
+        picker.onDidChangeValue((value) => {
+          picker.items = toItems(filterPythonRuntimes(runtimes, value));
+        }),
+        picker.onDidAccept(() => {
+          resolve(picker.selectedItems[0]);
+          picker.hide();
+        }),
+        picker.onDidHide(() => resolve(undefined))
+      );
+      picker.show();
     });
+    pickerDisposables.forEach((disposable) => disposable.dispose());
+    picker.dispose();
     if (picked?.runtime) {
       await this.selectPythonRuntime(notebook, picked.runtime, true);
     } else if (picked?.action === "refresh") {

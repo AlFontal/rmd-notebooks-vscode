@@ -421,7 +421,7 @@ describe("Rmd Notebooks Notebook Host", () => {
 
     const environmentState = await waitFor(() => {
       const state = extensionApi.getPythonEnvironmentState(notebook.uri.toString());
-      return state.environments.length > 1 ? state : undefined;
+      return state.environments.length > 1 && state.selectedPath ? state : undefined;
     });
     assert.ok(environmentState.environments.some((environment) => environment.path !== "python3"));
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");

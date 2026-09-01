@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import {
   controllerIdForRuntime,
+  filterPythonRuntimes,
   mergePythonRuntimes,
   normalizePythonPath,
   PythonLaunchDescriptor,
@@ -16,6 +17,23 @@ describe("Python runtime catalog", () => {
   it("uses stable controller ids", () => {
     assert.equal(controllerIdForRuntime("env:one"), controllerIdForRuntime("env:one"));
     assert.notEqual(controllerIdForRuntime("env:one"), controllerIdForRuntime("env:two"));
+  });
+
+  it("fuzzy-filters by environment name, version, manager, and path", () => {
+    const rapid = {
+      ...runtime("rapid", "/Users/me/miniconda3/envs/rapid-e/bin/python", "environment"),
+      label: "Python 3.10.12 (rapid-e)",
+      description: "Conda"
+    };
+    const spatial = {
+      ...runtime("spatial", "/Users/me/miniconda3/envs/geospatial/bin/python", "environment"),
+      label: "Python 3.11.13 (geospatial-stuff)",
+      description: "Conda"
+    };
+    assert.deepEqual(filterPythonRuntimes([rapid, spatial], "rapid").map((entry) => entry.id), ["rapid"]);
+    assert.deepEqual(filterPythonRuntimes([rapid, spatial], "rpd").map((entry) => entry.id), ["rapid"]);
+    assert.deepEqual(filterPythonRuntimes([rapid, spatial], "3.11 conda").map((entry) => entry.id), ["spatial"]);
+    assert.deepEqual(filterPythonRuntimes([rapid, spatial], "geospatial/bin").map((entry) => entry.id), ["spatial"]);
   });
 
   it("deduplicates kernelspecs against environments while retaining the kernel name", () => {

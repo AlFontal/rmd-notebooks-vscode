@@ -60,7 +60,7 @@ Python chunks use the configured interpreter directly. When IPython is installed
 
 ## Python Environment Selection
 
-Use the standard kernel picker or the always-visible **Select Python Environment** toolbar button. Rmd Notebooks registers every environment from the global Python Environments catalog plus local Python kernelspecs, uses the file/workspace-active environment as the initial suggestion, and remembers the selection per document.
+Use the one-step **Select Python Environment** toolbar command or the `Python: <environment>` status-bar control. Results appear immediately and fuzzy-match environment names, versions, managers, and paths. The standard VS Code kernel picker remains available, but VS Code groups third-party controllers behind an additional kernel-source step. Rmd Notebooks automatically selects the file/workspace-active environment initially and remembers the choice per document.
 
 The Marketplace package installs the Python Environments integration automatically. In hosts where it is unavailable, kernelspec discovery and `rmdNotebooks.python.path` remain available. A picker selection takes precedence. Changing environments disposes the old per-document Python session and starts a fresh session on the next run.
 
