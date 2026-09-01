@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "mocha";
-import { parseFrontmatter } from "../../notebook/frontmatter";
+import { parseFrontmatter, parseJupyterFrontmatter, updateJupyterFrontmatter } from "../../notebook/frontmatter";
 
 describe("frontmatter", () => {
   it("parses frontmatter only at the start of a document", () => {
@@ -24,5 +24,19 @@ describe("frontmatter", () => {
 
   it("does not treat an unclosed opening delimiter as frontmatter", () => {
     assert.equal(parseFrontmatter("---\ntitle: Example"), undefined);
+  });
+
+  it("parses scalar and full kernelspec Jupyter metadata", () => {
+    assert.equal(parseJupyterFrontmatter("title: Test\njupyter: python3")?.kernelName, "python3");
+    assert.equal(
+      parseJupyterFrontmatter("jupyter:\n  kernelspec:\n    name: project-python\n    language: python")?.kernelName,
+      "project-python"
+    );
+  });
+
+  it("updates or removes Jupyter metadata without changing other YAML", () => {
+    const body = "title: Test\njupyter:\n  kernelspec:\n    name: old\n    language: python\nauthor: Ada";
+    assert.equal(updateJupyterFrontmatter(body, "new-kernel"), "title: Test\njupyter: new-kernel\nauthor: Ada");
+    assert.equal(updateJupyterFrontmatter(body), "title: Test\nauthor: Ada");
   });
 });

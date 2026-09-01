@@ -49,6 +49,10 @@ export class OutputChannelController implements vscode.Disposable {
     return this.transcript.join("\n");
   }
 
+  public logDiagnostic(message: string): void {
+    this.appendBlock(["# Python environment discovery", message, ""]);
+  }
+
   public dispose(): void {
     this.channel.dispose();
   }

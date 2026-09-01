@@ -5,7 +5,11 @@ import { runTests, runVSCodeCommand } from "@vscode/test-electron";
 
 async function main(): Promise<void> {
   const extensionDevelopmentPath = path.resolve(__dirname, "../../..");
-  await installLocalExtensionDependencies(extensionDevelopmentPath, ["REditorSupport.r", "ms-python.python"]);
+  await installLocalExtensionDependencies(extensionDevelopmentPath, [
+    "REditorSupport.r",
+    "ms-python.python",
+    "ms-python.vscode-python-envs"
+  ]);
   const extensionTestsPath = path.resolve(__dirname, "./suite/index");
   const workspacePath = await createWorkspaceFixture();
   const resultFilePath = path.resolve(__dirname, ".vscode-test-result.json");

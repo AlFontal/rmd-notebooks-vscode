@@ -13,7 +13,7 @@ import {
 } from "./executorTypes";
 import { CancelledExecutionError } from "./executionErrors";
 
-const READY_MARKER = "RMD_NOTEBOOKS_PYTHON_READY";
+const READY_PREFIX = "RMD_NOTEBOOKS_PYTHON_READY:";
 const COMMAND_PREFIX = "RMD_NOTEBOOKS_PYTHON_COMMAND:";
 const RESULT_PREFIX = "RMD_NOTEBOOKS_PYTHON_RESULT:";
 const PROMPT_PREFIX = "RMD_NOTEBOOKS_PYTHON_PROMPT:";
@@ -66,13 +66,23 @@ interface QueuedExecution {
 export interface PythonInterpreterSelection {
   id: string;
   path: string;
+  prefixArgs?: string[];
+  renderPythonPath?: string;
   environmentVariables?: Record<string, string | undefined>;
 }
+
+export type PythonExecutionEngine = "ipython" | "python";
 
 export class PythonExecutor implements Executor {
   public readonly language = "python";
   private readonly sessions = new Map<string, PythonSession>();
   private readonly selections = new Map<string, PythonInterpreterSelection>();
+  private readonly fallbackEmitter = new vscode.EventEmitter<{
+    documentUri: string;
+    selection?: PythonInterpreterSelection;
+  }>();
+  private readonly reportedFallbacks = new Set<string>();
+  public readonly onDidUsePythonFallback = this.fallbackEmitter.event;
 
   public constructor(private readonly extensionUri: vscode.Uri) {}
 
@@ -162,11 +172,12 @@ export class PythonExecutor implements Executor {
 
   public async disposeAll(): Promise<void> {
     await Promise.all([...this.sessions.keys()].map((uri) => this.disposeSession(uri)));
+    this.fallbackEmitter.dispose();
   }
 
   public async selectInterpreter(documentUri: string, selection?: PythonInterpreterSelection): Promise<void> {
     const current = this.selections.get(documentUri);
-    if (current?.id === selection?.id && current?.path === selection?.path) {
+    if (JSON.stringify(current) === JSON.stringify(selection)) {
       return;
     }
 
@@ -192,7 +203,10 @@ export class PythonExecutor implements Executor {
     const selection = this.selections.get(documentUri);
     const configuredPath = configuration.get<string>("python.path", "").trim();
     const pythonPath = selection?.path || configuredPath || (process.platform === "win32" ? "python" : "python3");
-    const pythonArgs = configuration.get<string[]>("python.args", ["-u"]);
+    const pythonArgs = [
+      ...(selection?.prefixArgs ?? []),
+      ...configuration.get<string[]>("python.args", ["-u"])
+    ];
     const startupTimeoutMs = configuration.get<number>("python.startupTimeoutMs", 30000);
     const scriptPath = path.join(this.extensionUri.fsPath, "media", "python", "rmd_notebooks_session.py");
     const created = new PythonSession(
@@ -204,14 +218,24 @@ export class PythonExecutor implements Executor {
       selection?.environmentVariables
     );
     this.sessions.set(documentUri, created);
-    created.ready().catch(() => {
-      if (this.sessions.get(documentUri) === created) {
-        this.sessions.delete(documentUri);
+    void created.ready().then(
+      (engine) => {
+        if (engine !== "python") {
+          return;
+        }
+        const reportKey = `${documentUri}::${selection?.id ?? pythonPath}`;
+        if (!this.reportedFallbacks.has(reportKey)) {
+          this.reportedFallbacks.add(reportKey);
+          this.fallbackEmitter.fire({ documentUri, selection });
+        }
+      },
+      () => {
+        if (this.sessions.get(documentUri) === created) {
+          this.sessions.delete(documentUri);
+        }
+        void created.dispose(false);
       }
-      // Let the readiness rejection reach queued cells with the real startup
-      // error instead of replacing it with a disposal cancellation.
-      void created.dispose(false);
-    });
+    );
     return created;
   }
 }
@@ -219,8 +243,8 @@ export class PythonExecutor implements Executor {
 class PythonSession {
   private readonly process: ChildProcessWithoutNullStreams;
   private readonly lineReader: readline.Interface;
-  private readonly readyPromise: Promise<void>;
-  private readyResolve!: () => void;
+  private readonly readyPromise: Promise<PythonExecutionEngine>;
+  private readyResolve!: (engine: PythonExecutionEngine) => void;
   private readyReject!: (error: Error) => void;
   private readonly startTimer: NodeJS.Timeout;
   private readonly queue: QueuedExecution[] = [];
@@ -250,7 +274,7 @@ class PythonSession {
       }
     });
     this.lineReader = readline.createInterface({ input: this.process.stdout });
-    this.readyPromise = new Promise<void>((resolve, reject) => {
+    this.readyPromise = new Promise<PythonExecutionEngine>((resolve, reject) => {
       this.readyResolve = resolve;
       this.readyReject = reject;
     });
@@ -275,8 +299,8 @@ class PythonSession {
     });
   }
 
-  public async ready(): Promise<void> {
-    await this.readyPromise;
+  public async ready(): Promise<PythonExecutionEngine> {
+    return this.readyPromise;
   }
 
   public execute(request: ExecutionRequest, token?: ExecutionCancellationToken): Promise<RawExecutionPayload> {
@@ -359,10 +383,11 @@ class PythonSession {
   }
 
   private handleStdoutLine(line: string): void {
-    if (line === READY_MARKER) {
+    if (line.startsWith(READY_PREFIX)) {
       this.sessionReady = true;
       clearTimeout(this.startTimer);
-      this.readyResolve();
+      const payload = decodeMessage<{ engine?: string }>(line.slice(READY_PREFIX.length));
+      this.readyResolve(payload.engine === "ipython" ? "ipython" : "python");
       return;
     }
     if (line.startsWith(PROMPT_PREFIX)) {

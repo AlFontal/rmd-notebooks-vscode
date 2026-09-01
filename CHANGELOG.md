@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- execute `{python}` chunks in persistent per-document Python sessions, with automatic Python-environment discovery in the standard kernel picker plus IPython magics, top-level await, `display()`, rich formatters, Matplotlib and Plotnine plots, display updates, prompts, cancellation, and session restart support (#27)
+- execute `{python}` chunks in persistent per-document Python sessions, with global Python-environment and kernelspec discovery, an always-visible selector, Quarto preview alignment, IPython magics and rich output, Matplotlib and Plotnine plots, prompts, cancellation, and session restart support (#27)
 
 ## 0.5.0
 

@@ -1,7 +1,8 @@
 import { strict as assert } from "node:assert";
 import { afterEach, before, beforeEach, describe, it } from "mocha";
 import * as vscode from "vscode";
-import { PreviewServices, previewNotebookHtml } from "../../../src/commands/previewHtml";
+import { PreviewServices, previewNotebookHtml, withQuartoPython } from "../../../src/commands/previewHtml";
+import { controllerIdForRuntime } from "../../../src/execution/pythonRuntimeTypes";
 
 interface InlineChunksExtensionApi {
   getDocumentState(documentUri: string): Promise<{
@@ -147,6 +148,7 @@ describe("Rmd Notebooks Notebook Host", () => {
 
   it("routes saved notebook previews and restores Rmd notebook view after failures", async () => {
     const calls: string[] = [];
+    let previewPython: string | undefined;
     const services: PreviewServices = {
       ensureIntegration: async (extensionId, commandId) => {
         calls.push(`ensure:${extensionId}:${commandId}`);
@@ -154,6 +156,9 @@ describe("Rmd Notebooks Notebook Host", () => {
       },
       executeCommand: async (commandId) => {
         calls.push(`execute:${commandId}`);
+        if (commandId === "quarto.preview") {
+          previewPython = process.env.QUARTO_PYTHON;
+        }
         if (commandId === "r.rmarkdown.showPreviewToSide") {
           throw new Error("preview failed");
         }
@@ -172,6 +177,7 @@ describe("Rmd Notebooks Notebook Host", () => {
     const qmdResult = await previewNotebookHtml(
       {
         uri: vscode.Uri.file("/tmp/preview.qmd"),
+        pythonPath: "/env/bin/python",
         save: async () => {
           calls.push("save:qmd");
           return true;
@@ -180,6 +186,7 @@ describe("Rmd Notebooks Notebook Host", () => {
       services
     );
     assert.equal(qmdResult, "previewed");
+    assert.equal(previewPython, "/env/bin/python");
     assert.deepEqual(calls.slice(0, 5), [
       "save:qmd",
       "ensure:quarto.quarto:quarto.preview",
@@ -208,6 +215,34 @@ describe("Rmd Notebooks Notebook Host", () => {
       "execute:r.rmarkdown.showPreviewToSide",
       "restoreNotebook"
     ]);
+  });
+
+  it("serializes scoped Quarto Python overrides and restores the process environment", async () => {
+    const previous = process.env.QUARTO_PYTHON;
+    const observations: string[] = [];
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = withQuartoPython("/env/one/python", async () => {
+      observations.push(process.env.QUARTO_PYTHON ?? "missing");
+      firstStarted();
+      await hold;
+    });
+    await started;
+    const second = withQuartoPython("/env/two/python", async () => {
+      observations.push(process.env.QUARTO_PYTHON ?? "missing");
+    });
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    assert.deepEqual(observations, ["/env/one/python", "/env/two/python"]);
+    assert.equal(process.env.QUARTO_PYTHON, previous);
   });
 
   it("does not preview when saving is cancelled or an integration is missing", async () => {
@@ -373,6 +408,67 @@ describe("Rmd Notebooks Notebook Host", () => {
     const saved = Buffer.from(await vscode.workspace.fs.readFile(editor.notebook.uri)).toString("utf8");
     assert.ok(saved.includes("```{python setup}"));
     assert.ok(saved.includes("shared_value = 40"));
+  });
+
+  it("discovers Python environments for standalone qmd notebook documents", async () => {
+    const uri = vscode.Uri.file(`/tmp/rmd-notebooks-standalone-${process.pid}.qmd`);
+    await vscode.workspace.fs.writeFile(
+      uri,
+      Buffer.from("```{python}\nimport sys\nsys.executable\n```\n", "utf8")
+    );
+    const notebook = await vscode.workspace.openNotebookDocument(uri);
+    await vscode.window.showNotebookDocument(notebook);
+
+    const environmentState = await waitFor(() => {
+      const state = extensionApi.getPythonEnvironmentState(notebook.uri.toString());
+      return state.environments.length > 1 ? state : undefined;
+    });
+    assert.ok(environmentState.environments.some((environment) => environment.path !== "python3"));
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    await vscode.workspace.fs.delete(uri);
+  });
+
+  it("switches Python controllers and resets the document session", async () => {
+    await writeFixture(
+      "python-kernel-switch.qmd",
+      [
+        "# Python kernel switch",
+        "",
+        "```{python assign}",
+        "kernel_switch_value = 42",
+        "```",
+        "",
+        "```{python read}",
+        "kernel_switch_value",
+        "```",
+        ""
+      ].join("\n")
+    );
+    const editor = await openNotebookEditor("python-kernel-switch.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    await waitForDocumentState(editor.notebook.uri, (state) =>
+      state.outputs.some((record) => record.status === "success")
+    );
+
+    await updateTestSetting("python.path", "python3");
+    await vscode.commands.executeCommand("rmdNotebooks.refreshPythonEnvironments");
+    await vscode.commands.executeCommand("_notebook.selectKernel", {
+      id: controllerIdForRuntime("configured:python3"),
+      extension: "AlFontal.rmd-notebooks-vscode"
+    });
+    await waitFor(() =>
+      extensionApi.getPythonEnvironmentState(editor.notebook.uri.toString()).selectedPath === "python3"
+        ? true
+        : undefined
+    );
+
+    editor.selection = singleCellRange(findLastCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "error")
+    );
+    assert.ok(state.outputChannelText.includes("NameError"));
   });
 
   it("handles Python input() through the notebook prompt UI", async () => {

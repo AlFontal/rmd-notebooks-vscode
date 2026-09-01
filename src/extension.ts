@@ -59,14 +59,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
   executorRegistry.register(rExecutor);
   executorRegistry.register(pythonExecutor);
 
+  const pythonEnvironmentDiscovery = new PythonEnvironmentDiscovery();
   const notebookRuntime = new InlineChunksNotebookRuntime(
     outputStore,
     executorRegistry,
     outputChannelController,
     terminalRunner,
-    pythonExecutor
+    pythonExecutor,
+    pythonEnvironmentDiscovery,
+    context.workspaceState
   );
-  const pythonEnvironmentDiscovery = new PythonEnvironmentDiscovery(notebookRuntime);
   const cellStatusBarProvider = new InlineChunksCellStatusBarProvider(notebookRuntime);
 
   context.subscriptions.push(

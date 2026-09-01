@@ -8,7 +8,7 @@
   <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/AlFontal/rmd-notebooks-vscode/ci.yml?branch=main&label=ci" />
   <a href="https://marketplace.visualstudio.com/items?itemName=AlFontal.rmd-notebooks-vscode"><img alt="Install for VS Code" src="https://img.shields.io/badge/install-for%20VS%20Code-007ACC?logo=visualstudiocode&logoColor=white" /></a>
   <a href="https://open-vsx.org/extension/AlFontal/rmd-notebooks-vscode"><img alt="Install for Positron" src="https://img.shields.io/badge/install-for%20Positron-447099" /></a>
-  <img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-%5E1.88-007ACC?logo=visualstudiocode&logoColor=white" />
+  <img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-%5E1.110-007ACC?logo=visualstudiocode&logoColor=white" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-2E8B57" />
 </p>
 
@@ -28,7 +28,7 @@ Rmd Notebooks opens R Markdown and Quarto documents as runnable notebooks withou
 
 ## Requirements
 
-- VS Code-compatible editor API `^1.88.0`
+- VS Code-compatible editor API `^1.110.0`
 - R available on your PATH, or configured with `rmdNotebooks.r.path`, for R chunks
 - Python available on your PATH, or configured with `rmdNotebooks.python.path`, for Python chunks
 - IPython in that Python environment for magics, top-level `await`, `display()`, and the complete rich-display formatter stack; plain Python execution remains available without it
@@ -41,7 +41,7 @@ The VS Code Marketplace package installs the [vscode-R extension](https://market
 - Runs R and Python chunks in persistent per-document sessions, queueing rapid requests in execution order
 - Uses IPython automatically when available for magics, shell escapes, top-level `await`, multiple `display()` outputs, display updates, and registered rich formatters
 - Falls back to a dependency-free Python evaluator while keeping variables available to later Python chunks
-- Populates the standard notebook kernel picker from Python environments discovered by the VS Code Python extension and remembers the selected environment per document
+- Populates the standard notebook kernel picker from the global Python Environments catalog and local Jupyter kernelspecs, including standalone qmd files
 - Evaluates inline chunks in `.GlobalEnv`, so user variables are normal R workspace variables
 - Honors normal R startup files by default, including project `.Rprofile` files used by tools such as `renv`
 - Shows inline stdout, stderr, HTML/Markdown representations, static PNG plots, and rich data-frame tables
@@ -60,9 +60,11 @@ Python chunks use the configured interpreter directly. When IPython is installed
 
 ## Python Environment Selection
 
-Use the standard kernel picker in the notebook toolbar to select a Python environment. Rmd Notebooks registers the environments discovered by the VS Code Python extension as notebook controllers, uses the workspace-active Python environment as the initial suggestion, and relies on VS Code to remember the selected controller for each document.
+Use the standard kernel picker or the always-visible **Select Python Environment** toolbar button. Rmd Notebooks registers every environment from the global Python Environments catalog plus local Python kernelspecs, uses the file/workspace-active environment as the initial suggestion, and remembers the selection per document.
 
-The Marketplace package offers the Python extension automatically. In hosts where that extension is unavailable, or for headless/portable setups, `rmdNotebooks.python.path` remains the executable fallback for the base controller. A kernel-picker selection takes precedence. Changing kernels disposes the old per-document Python session and starts a fresh session in the newly selected environment on the next run.
+The Marketplace package installs the Python Environments integration automatically. In hosts where it is unavailable, kernelspec discovery and `rmdNotebooks.python.path` remain available. A picker selection takes precedence. Changing environments disposes the old per-document Python session and starts a fresh session on the next run.
+
+If the document pins a different `jupyter:` kernel in YAML, Rmd Notebooks asks whether to use that kernel or synchronize the source with the selected environment. Extension-triggered Quarto previews receive the selected interpreter through `QUARTO_PYTHON` without changing the surrounding VS Code process environment permanently.
 
 Verify the selected environment from a Python chunk:
 
@@ -112,13 +114,15 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 - `Rmd Notebooks: Clear Current Output`
 - `Rmd Notebooks: Clear All Outputs`
 - `Rmd Notebooks: Restart Execution Sessions`
+- `Rmd Notebooks: Select Python Environment`
+- `Rmd Notebooks: Refresh Python Environments`
 - `Rmd Notebooks: Run Current Chunk in R Terminal`
 - `Rmd Notebooks: Show Output Panel`
 - `Rmd Notebooks: Preview HTML`
 - `Rmd Notebooks: Edit Chunk Header`
 - `Rmd Notebooks: Toggle Notebook / Raw Source View`
 
-The notebook toolbar also exposes `Stop All Running Chunks`, `Restart Execution Sessions`, and `View Source`.
+The notebook toolbar also exposes `Select Python Environment`, `Stop All Running Chunks`, `Restart Execution Sessions`, and `View Source`.
 
 ## Settings
 

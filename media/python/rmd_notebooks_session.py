@@ -22,7 +22,7 @@ import traceback
 from typing import Any
 
 
-READY_MARKER = "RMD_NOTEBOOKS_PYTHON_READY"
+READY_PREFIX = "RMD_NOTEBOOKS_PYTHON_READY:"
 COMMAND_PREFIX = "RMD_NOTEBOOKS_PYTHON_COMMAND:"
 RESULT_PREFIX = "RMD_NOTEBOOKS_PYTHON_RESULT:"
 PROMPT_PREFIX = "RMD_NOTEBOOKS_PYTHON_PROMPT:"
@@ -447,8 +447,7 @@ def _execute(
 def main() -> None:
     namespace: dict[str, Any] = {"__name__": "__main__", "__builtins__": builtins}
     ipython_runtime = _create_ipython_runtime(namespace)
-    sys.__stdout__.write(READY_MARKER + "\n")
-    sys.__stdout__.flush()
+    _emit(READY_PREFIX, {"engine": "ipython" if ipython_runtime else "python"})
 
     while True:
         line = sys.__stdin__.readline()

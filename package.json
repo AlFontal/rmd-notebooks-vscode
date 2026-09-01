@@ -12,7 +12,8 @@
     "url": "https://github.com/AlFontal/rmd-notebooks-vscode.git"
   },
   "extensionDependencies": [
-    "REditorSupport.r"
+    "REditorSupport.r",
+    "ms-python.vscode-python-envs"
   ],
   "extensionPack": [
     "ms-python.python"
@@ -22,7 +23,7 @@
   },
   "homepage": "https://github.com/AlFontal/rmd-notebooks-vscode#readme",
   "engines": {
-    "vscode": "^1.88.0"
+    "vscode": "^1.110.0"
   },
   "categories": [
     "Other"
@@ -95,6 +96,18 @@
         "icon": "$(debug-restart)"
       },
       {
+        "command": "rmdNotebooks.selectPythonEnvironment",
+        "title": "Select Python Environment",
+        "category": "Rmd Notebooks",
+        "icon": "$(server-environment)"
+      },
+      {
+        "command": "rmdNotebooks.refreshPythonEnvironments",
+        "title": "Refresh Python Environments",
+        "category": "Rmd Notebooks",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "rmdNotebooks.runCurrentChunkInTerminal",
         "title": "Rmd Notebooks: Run Current Chunk in R Terminal"
       },
@@ -124,6 +137,11 @@
     ],
     "menus": {
       "notebook/toolbar": [
+        {
+          "command": "rmdNotebooks.selectPythonEnvironment",
+          "when": "notebookType == rmd-notebooks-vscode-notebook && resourceExtname == .qmd",
+          "group": "navigation@95"
+        },
         {
           "command": "rmdNotebooks.previewHtml",
           "when": "notebookType == rmd-notebooks-vscode-notebook && resourceExtname =~ /\\.[Rr]md$/",
@@ -307,7 +325,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.15.30",
-    "@types/vscode": "^1.88.0",
+    "@types/vscode": "^1.110.0",
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.6.0",
     "mocha": "^11.2.2",
@@ -315,6 +333,6 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "@vscode/python-extension": "^1.0.6"
+    "@vscode/python-environments": "^1.0.0"
   }
 }

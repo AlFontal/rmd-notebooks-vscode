@@ -1,171 +1,195 @@
 import * as vscode from "vscode";
-import { Environment, PythonExtension, ResolvedEnvironment } from "@vscode/python-extension";
-import { INLINE_CHUNKS_NOTEBOOK_TYPE } from "../notebook/notebookTypes";
+import { realpath } from "node:fs/promises";
+import * as path from "node:path";
+import { PythonEnvironment, PythonEnvironmentApi, PythonEnvironments } from "@vscode/python-environments";
+import { mergePythonRuntimes, PythonLaunchDescriptor } from "../execution/pythonRuntimeTypes";
+import { discoverPythonKernelspecs } from "./jupyterKernelspecDiscovery";
 
-export interface PythonEnvironmentDescriptor {
-  id: string;
-  interpreterPath: string;
-  label: string;
-  description?: string;
-  detail?: string;
-}
-
-export interface PythonEnvironmentControllerHost {
-  syncPythonEnvironments(environments: readonly PythonEnvironmentDescriptor[]): void;
-  setPreferredPythonEnvironment(notebook: vscode.NotebookDocument, environmentId?: string): void;
+export interface PythonRuntimeCatalogState {
+  available: boolean;
+  environments: number;
+  kernelspecs: number;
+  error?: string;
 }
 
 export class PythonEnvironmentDiscovery implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
-  private environments: PythonEnvironmentDescriptor[] = [];
-  private refreshTimer: NodeJS.Timeout | undefined;
-  private pythonApi: Awaited<ReturnType<typeof PythonExtension.api>> | undefined;
+  private readonly changeEmitter = new vscode.EventEmitter<void>();
+  private readonly environmentByRuntimeId = new Map<string, PythonEnvironment>();
+  private api: PythonEnvironmentApi | undefined;
+  private runtimes: PythonLaunchDescriptor[] = [];
+  private refreshPromise: Promise<void> | undefined;
+  private state: PythonRuntimeCatalogState = {
+    available: false,
+    environments: 0,
+    kernelspecs: 0
+  };
 
-  public constructor(private readonly host: PythonEnvironmentControllerHost) {}
+  public readonly onDidChangeRuntimes = this.changeEmitter.event;
 
   public async initialize(): Promise<void> {
     try {
-      this.pythonApi = await PythonExtension.api();
-      await this.pythonApi.ready;
-      await this.pythonApi.environments.refreshEnvironments();
+      this.api = await PythonEnvironments.api();
+      this.disposables.push(
+        this.api.onDidChangeEnvironments(() => void this.refresh()),
+        this.api.onDidChangeEnvironment(() => this.changeEmitter.fire())
+      );
     } catch (error) {
-      console.info("Rmd Notebooks: Python environment discovery is unavailable", error);
-      this.host.syncPythonEnvironments([]);
-      return;
+      this.state = {
+        available: false,
+        environments: 0,
+        kernelspecs: 0,
+        error: toErrorMessage(error)
+      };
     }
-
-    this.disposables.push(
-      this.pythonApi.environments.onDidChangeEnvironments(() => this.scheduleRefresh()),
-      this.pythonApi.environments.onDidChangeActiveEnvironmentPath(() => this.refreshPreferences()),
-      vscode.workspace.onDidOpenNotebookDocument((notebook) => this.refreshPreference(notebook)),
-      vscode.workspace.onDidChangeNotebookDocument((event) => {
-        if (event.contentChanges.length > 0 || event.cellChanges.some((change) => change.document !== undefined)) {
-          this.refreshPreference(event.notebook);
-        }
-      }),
-      vscode.workspace.onDidChangeConfiguration((event) => {
-        if (event.affectsConfiguration("rmdNotebooks.python.path")) {
-          this.refreshPreferences();
-        }
-      })
-    );
-
-    await this.refreshEnvironments();
+    await this.refresh();
   }
 
   public dispose(): void {
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer);
-    }
     this.disposables.forEach((disposable) => disposable.dispose());
+    this.changeEmitter.dispose();
   }
 
-  private scheduleRefresh(): void {
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer);
-    }
-    this.refreshTimer = setTimeout(() => {
-      this.refreshTimer = undefined;
-      void this.refreshEnvironments();
-    }, 100);
+  public getState(): PythonRuntimeCatalogState {
+    return { ...this.state };
   }
 
-  private async refreshEnvironments(): Promise<void> {
-    if (!this.pythonApi) {
-      return;
-    }
-
-    const resolved = await Promise.all(
-      this.pythonApi.environments.known.map((environment) => this.resolveEnvironment(environment))
-    );
-    const seenPaths = new Set<string>();
-    this.environments = resolved
-      .filter((environment): environment is ResolvedEnvironment => environment !== undefined)
-      .map(toDescriptor)
-      .filter((environment) => {
-        const normalizedPath = normalizePath(environment.interpreterPath);
-        if (seenPaths.has(normalizedPath)) {
-          return false;
-        }
-        seenPaths.add(normalizedPath);
-        return true;
-      })
-      .sort((left, right) => left.label.localeCompare(right.label));
-
-    this.host.syncPythonEnvironments(this.environments);
-    this.refreshPreferences();
-  }
-
-  private async resolveEnvironment(environment: Environment): Promise<ResolvedEnvironment | undefined> {
-    if (!this.pythonApi) {
-      return undefined;
-    }
-    const resolved = await this.pythonApi.environments.resolveEnvironment(environment);
-    return resolved?.executable.uri ? resolved : undefined;
-  }
-
-  private refreshPreferences(): void {
-    for (const notebook of vscode.workspace.notebookDocuments) {
-      this.refreshPreference(notebook);
-    }
-  }
-
-  private refreshPreference(notebook: vscode.NotebookDocument): void {
-    if (!this.pythonApi || notebook.notebookType !== INLINE_CHUNKS_NOTEBOOK_TYPE) {
-      return;
-    }
-
-    const hasPythonCells = notebook.getCells().some(
-      (cell) =>
-        cell.kind === vscode.NotebookCellKind.Code &&
-        ["python", "py"].includes(cell.document.languageId.toLowerCase())
-    );
-    if (!hasPythonCells) {
-      this.host.setPreferredPythonEnvironment(notebook);
-      return;
-    }
-
+  public getRuntimes(resource?: vscode.Uri): PythonLaunchDescriptor[] {
+    const additions: PythonLaunchDescriptor[] = [];
     const configuredPath = vscode.workspace
-      .getConfiguration("rmdNotebooks", notebook.uri)
+      .getConfiguration("rmdNotebooks", resource)
       .get<string>("python.path", "")
       .trim();
     if (configuredPath) {
-      this.host.setPreferredPythonEnvironment(notebook);
-      return;
+      additions.push({
+        id: `configured:${configuredPath}`,
+        label: "Configured Python",
+        description: "rmdNotebooks.python.path",
+        detail: configuredPath,
+        source: "configured",
+        executable: configuredPath,
+        prefixArgs: [],
+        renderPythonPath: configuredPath,
+        kernelspecNames: []
+      });
     }
 
-    const active = this.pythonApi.environments.getActiveEnvironmentPath(notebook.uri);
-    const match = this.environments.find(
-      (environment) => environment.id === active.id || normalizePath(environment.interpreterPath) === normalizePath(active.path)
-    );
-    this.host.setPreferredPythonEnvironment(notebook, match?.id);
+    const fallbackExecutable = process.platform === "win32" ? "python" : "python3";
+    additions.push({
+      id: `fallback:${fallbackExecutable}`,
+      label: `Default ${fallbackExecutable}`,
+      description: "PATH fallback",
+      detail: fallbackExecutable,
+      source: "fallback",
+      executable: fallbackExecutable,
+      prefixArgs: [],
+      renderPythonPath: fallbackExecutable,
+      kernelspecNames: []
+    });
+    return [...this.runtimes, ...additions];
+  }
+
+  public async getActiveEnvironmentId(resource?: vscode.Uri): Promise<string | undefined> {
+    const environment = await this.api?.getEnvironment(resource);
+    return environment ? environmentRuntimeId(environment) : undefined;
+  }
+
+  public async refresh(): Promise<void> {
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+    this.refreshPromise = this.performRefresh().finally(() => {
+      this.refreshPromise = undefined;
+    });
+    return this.refreshPromise;
+  }
+
+  public async installIPython(runtimeId: string): Promise<boolean> {
+    const environment = this.environmentByRuntimeId.get(runtimeId);
+    if (!this.api || !environment) {
+      return false;
+    }
+    await this.api.managePackages(environment, {
+      install: ["ipython"],
+      showSkipOption: true
+    });
+    return true;
+  }
+
+  private async performRefresh(): Promise<void> {
+    let environments: PythonLaunchDescriptor[] = [];
+    let environmentError: string | undefined;
+    this.environmentByRuntimeId.clear();
+
+    if (this.api) {
+      try {
+        await this.api.refreshEnvironments(undefined);
+        const discovered = await this.api.getEnvironments("all");
+        const resolved = await Promise.all(
+          discovered.map(async (environment) =>
+            (await this.api?.resolveEnvironment(environment.environmentPath)) ?? environment
+          )
+        );
+        const environmentRuntimes = await Promise.all(resolved.map((environment) => toRuntimeDescriptor(environment)));
+        environments = environmentRuntimes.flatMap((runtime, index) => {
+          if (!runtime) {
+            return [];
+          }
+          this.environmentByRuntimeId.set(runtime.id, resolved[index]);
+          return [runtime];
+        });
+      } catch (error) {
+        environmentError = toErrorMessage(error);
+      }
+    }
+
+    const kernelspecs = await discoverPythonKernelspecs();
+    this.runtimes = mergePythonRuntimes(environments, kernelspecs);
+    this.state = {
+      available: Boolean(this.api) || kernelspecs.length > 0,
+      environments: environments.length,
+      kernelspecs: kernelspecs.length,
+      error: environmentError ?? (this.api ? undefined : this.state.error)
+    };
+    this.changeEmitter.fire();
   }
 }
 
-function toDescriptor(environment: ResolvedEnvironment): PythonEnvironmentDescriptor {
-  const interpreterPath = environment.executable.uri?.fsPath ?? environment.path;
-  const version = formatVersion(environment);
-  const name = environment.environment?.name?.trim();
-  const label = name ? `${version} (${name})` : version;
-  const tool = environment.tools[0] ?? environment.environment?.type;
-
+async function toRuntimeDescriptor(environment: PythonEnvironment): Promise<PythonLaunchDescriptor | undefined> {
+  const run = environment.execInfo.activatedRun ?? environment.execInfo.run;
+  if (!run?.executable) {
+    return undefined;
+  }
+  const rawRenderPythonPath = environment.execInfo.run.executable;
+  const renderPythonPath = path.isAbsolute(rawRenderPythonPath)
+    ? await realpath(rawRenderPythonPath).catch(() => rawRenderPythonPath)
+    : rawRenderPythonPath;
+  const executable = run.executable === rawRenderPythonPath ? renderPythonPath : run.executable;
   return {
-    id: environment.id,
-    interpreterPath,
-    label,
-    description: tool ? String(tool) : "Python",
-    detail: interpreterPath
+    id: environmentRuntimeId(environment),
+    label: environment.displayName || environment.name || "Python",
+    description: environment.description ?? formatGroup(environment.group),
+    detail: environment.displayPath || renderPythonPath,
+    source: "environment",
+    executable,
+    prefixArgs: [...(run.args ?? [])],
+    renderPythonPath,
+    environmentId: environmentRuntimeId(environment),
+    kernelspecNames: []
   };
 }
 
-function formatVersion(environment: ResolvedEnvironment): string {
-  const version = environment.version;
-  if (!version) {
-    return "Python";
-  }
-  return `Python ${version.major}.${version.minor}.${version.micro}`;
+function environmentRuntimeId(environment: PythonEnvironment): string {
+  return `environment:${environment.envId.managerId}:${environment.envId.id}`;
 }
 
-function normalizePath(value: string): string {
-  return process.platform === "win32" ? value.toLowerCase().replace(/\\/g, "/") : value;
+function formatGroup(group: PythonEnvironment["group"]): string | undefined {
+  if (!group) {
+    return undefined;
+  }
+  return typeof group === "string" ? group : group.description ?? group.name;
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
