@@ -40,13 +40,30 @@ function assertDependencyPolicy(vsixPath) {
   const manifest = readPackagedManifest(vsixPath);
   const dependencies = manifest.extensionDependencies || [];
   const hasRExtensionDependency = dependencies.includes("REditorSupport.r");
+  const hasPythonEnvironmentsDependency = dependencies.includes("ms-python.vscode-python-envs");
 
   if (variant === "marketplace" && !hasRExtensionDependency) {
     throw new Error("Marketplace VSIX must keep extensionDependencies: REditorSupport.r");
   }
 
+  if (variant === "marketplace" && !hasPythonEnvironmentsDependency) {
+    throw new Error("Marketplace VSIX must depend on ms-python.vscode-python-envs");
+  }
+
   if (variant === "openvsx" && hasRExtensionDependency) {
     throw new Error("Open VSX VSIX must not hard-depend on REditorSupport.r");
+  }
+
+  if (variant === "openvsx" && hasPythonEnvironmentsDependency) {
+    throw new Error("Open VSX VSIX must not depend on ms-python.vscode-python-envs");
+  }
+
+  const extensionPack = manifest.extensionPack || [];
+  if (variant === "marketplace" && !extensionPack.includes("ms-python.python")) {
+    throw new Error("Marketplace VSIX must include ms-python.python in extensionPack");
+  }
+  if (variant === "openvsx" && extensionPack.includes("ms-python.python")) {
+    throw new Error("Open VSX VSIX must not include the Marketplace-only Python extension pack entry");
   }
 }
 
@@ -56,6 +73,7 @@ const manifest = JSON.parse(originalPackageText);
 
 if (variant === "openvsx") {
   delete manifest.extensionDependencies;
+  delete manifest.extensionPack;
 }
 
 fs.rmSync(outputPath, { force: true });

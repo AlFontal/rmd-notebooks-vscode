@@ -1,8 +1,8 @@
 {
   "name": "rmd-notebooks-vscode",
   "displayName": "Rmd Notebooks for VS Code",
-  "description": "Open .Rmd and .qmd files as runnable R notebooks in VS Code and Positron.",
-  "version": "0.5.0",
+  "description": "Open .Rmd and .qmd files as runnable R and Python notebooks in VS Code and Positron.",
+  "version": "0.6.0",
   "publisher": "AlFontal",
   "author": "Alejandro Fontal",
   "license": "MIT",
@@ -12,20 +12,26 @@
     "url": "https://github.com/AlFontal/rmd-notebooks-vscode.git"
   },
   "extensionDependencies": [
-    "REditorSupport.r"
+    "REditorSupport.r",
+    "ms-python.vscode-python-envs"
+  ],
+  "extensionPack": [
+    "ms-python.python"
   ],
   "bugs": {
     "url": "https://github.com/AlFontal/rmd-notebooks-vscode/issues"
   },
   "homepage": "https://github.com/AlFontal/rmd-notebooks-vscode#readme",
   "engines": {
-    "vscode": "^1.88.0"
+    "vscode": "^1.110.0"
   },
   "categories": [
     "Other"
   ],
   "keywords": [
     "r",
+    "python",
+    "ipython",
     "rmarkdown",
     "quarto",
     "qmd",
@@ -86,8 +92,14 @@
       },
       {
         "command": "rmdNotebooks.restartSession",
-        "title": "Restart R Session",
+        "title": "Restart Execution Sessions",
         "icon": "$(debug-restart)"
+      },
+      {
+        "command": "rmdNotebooks.selectPythonEnvironment",
+        "title": "Select Python Environment",
+        "category": "Rmd Notebooks",
+        "icon": "$(server-environment)"
       },
       {
         "command": "rmdNotebooks.runCurrentChunkInTerminal",
@@ -185,6 +197,27 @@
           "minimum": 1000,
           "description": "How long to wait (in milliseconds) for an inline R session to finish starting before reporting a startup timeout. Increase this for projects with slow R startup, e.g. renv autoloading, a heavy .Rprofile, or Bioconductor."
         },
+        "rmdNotebooks.python.path": {
+          "type": "string",
+          "default": "",
+          "description": "Configured Python interpreter fallback. Persisted and file/workspace-active environments take precedence; when empty, selection continues through QUARTO_PYTHON and the platform PATH fallback."
+        },
+        "rmdNotebooks.python.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "-u"
+          ],
+          "description": "Arguments passed to the Python executable before starting the persistent chunk-execution session."
+        },
+        "rmdNotebooks.python.startupTimeoutMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 1000,
+          "description": "How long to wait (in milliseconds) for a Python chunk-execution session to start."
+        },
         "rmdNotebooks.execution.interactiveFallbackTimeoutMs": {
           "type": "number",
           "default": 0,
@@ -279,13 +312,16 @@
     "smoke:vscode-r": "Rscript --vanilla scripts/smoke_vscode_r_session_watcher.R"
   },
   "devDependencies": {
-    "@vscode/vsce": "^3.6.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.15.30",
-    "@types/vscode": "^1.88.0",
+    "@types/vscode": "^1.110.0",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.0",
     "mocha": "^11.2.2",
     "ovsx": "^0.10.9",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@vscode/python-environments": "^1.0.0"
   }
 }

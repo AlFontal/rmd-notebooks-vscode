@@ -61,6 +61,12 @@ export interface ErrorOutputItem {
   text: string;
 }
 
+export interface StreamOutputItem {
+  type: "stream";
+  name: "stderr";
+  text: string;
+}
+
 export interface ImageOutputItem {
   type: "image";
   path: string;
@@ -79,12 +85,26 @@ export interface MarkdownOutputItem {
   markdown: string;
 }
 
+export interface DisplayMimeItem {
+  mimeType: string;
+  data: string;
+  encoding?: "utf8" | "base64";
+}
+
+export interface DisplayOutputItem {
+  type: "display";
+  items: DisplayMimeItem[];
+  displayId?: string;
+}
+
 export type OutputItem =
   | TextOutputItem
+  | StreamOutputItem
   | ErrorOutputItem
   | ImageOutputItem
   | HtmlOutputItem
-  | MarkdownOutputItem;
+  | MarkdownOutputItem
+  | DisplayOutputItem;
 
 export type ChunkOutputStatus = "running" | "success" | "error" | "redirected" | "cancelled";
 

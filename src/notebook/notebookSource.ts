@@ -1,7 +1,7 @@
 import { TextDecoder, TextEncoder } from "node:util";
 import * as vscode from "vscode";
 import { parseExecutableChunks } from "../document/chunkParser";
-import { parseChunkOptions } from "./chunkOptions";
+import { parseChunkOptions, parseQuartoCellOptions } from "./chunkOptions";
 import { parseFrontmatter } from "./frontmatter";
 import { parseInlineRExpressions } from "./inlineR";
 import { getInlineChunksMetadata, withInlineChunksMetadata } from "./notebookTypes";
@@ -34,13 +34,14 @@ export function deserializeNotebookSource(content: Uint8Array): vscode.NotebookD
     pushMarkupCell(cells, before);
 
     const codeCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, chunk.body, chunk.language);
+    const quartoOptions = parseQuartoCellOptions(chunk.body);
     codeCell.metadata = withInlineChunksMetadata(codeCell.metadata, {
       kind: "code",
       header: chunk.header,
       headerInfo: chunk.headerInfo,
       language: chunk.language,
-      label: chunk.label,
-      options: parseChunkOptions(chunk.headerInfo),
+      label: chunk.label ?? quartoOptions.label,
+      options: { ...parseChunkOptions(chunk.headerInfo), ...quartoOptions },
       fenceLength: chunk.fenceLength,
       isClosed: chunk.isClosed
     });

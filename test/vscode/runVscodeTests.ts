@@ -1,15 +1,21 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { spawnSync } from "node:child_process";
 import { runTests, runVSCodeCommand } from "@vscode/test-electron";
 
 async function main(): Promise<void> {
   const extensionDevelopmentPath = path.resolve(__dirname, "../../..");
-  await installLocalExtensionDependencies(extensionDevelopmentPath, ["REditorSupport.r"]);
+  await installLocalExtensionDependencies(extensionDevelopmentPath, [
+    "REditorSupport.r",
+    "ms-python.python",
+    "ms-python.vscode-python-envs"
+  ]);
   const extensionTestsPath = path.resolve(__dirname, "./suite/index");
   const workspacePath = await createWorkspaceFixture();
   const resultFilePath = path.resolve(__dirname, ".vscode-test-result.json");
   const proofFilePath = "/tmp/rmd-notebooks-vscode-proof.txt";
+  const testPythonPath = findIPythonInterpreter();
 
   try {
     await fs.rm(resultFilePath, { force: true });
@@ -26,7 +32,8 @@ async function main(): Promise<void> {
         "--disable-updates"
       ],
       extensionTestsEnv: {
-        ELECTRON_RUN_AS_NODE: undefined
+        ELECTRON_RUN_AS_NODE: undefined,
+        RMD_NOTEBOOKS_TEST_PYTHON: testPythonPath
       },
       reuseMachineInstall: false
     });
@@ -36,6 +43,41 @@ async function main(): Promise<void> {
     await fs.rm(workspacePath, { recursive: true, force: true });
     await fs.rm(resultFilePath, { force: true });
   }
+}
+
+function findIPythonInterpreter(): string {
+  const executableName = process.platform === "win32" ? "python.exe" : "python";
+  const candidates = [
+    process.env.RMD_NOTEBOOKS_TEST_PYTHON,
+    process.env.VIRTUAL_ENV ? path.join(process.env.VIRTUAL_ENV, process.platform === "win32" ? "Scripts" : "bin", executableName) : undefined,
+    process.env.CONDA_PREFIX ? path.join(process.env.CONDA_PREFIX, process.platform === "win32" ? "Scripts" : "bin", executableName) : undefined,
+    interpreterBesideIPython(),
+    process.platform === "win32" ? "python" : "python3",
+    "python"
+  ].filter((candidate): candidate is string => Boolean(candidate));
+
+  for (const candidate of [...new Set(candidates)]) {
+    const check = spawnSync(candidate, ["-c", "import IPython, sys; print(sys.executable)"], {
+      encoding: "utf8"
+    });
+    if (check.status === 0) {
+      return check.stdout.trim() || candidate;
+    }
+  }
+
+  throw new Error(
+    "VS Code integration tests require an IPython-capable interpreter. " +
+    "Set RMD_NOTEBOOKS_TEST_PYTHON to one, or install IPython in python3."
+  );
+}
+
+function interpreterBesideIPython(): string | undefined {
+  const lookup = spawnSync(process.platform === "win32" ? "where" : "which", ["ipython"], { encoding: "utf8" });
+  const ipythonPath = lookup.status === 0 ? lookup.stdout.split(/\r?\n/)[0]?.trim() : undefined;
+  if (!ipythonPath) {
+    return undefined;
+  }
+  return path.join(path.dirname(ipythonPath), process.platform === "win32" ? "python.exe" : "python");
 }
 
 async function installLocalExtensionDependencies(extensionDevelopmentPath: string, extensionIds: string[]): Promise<void> {

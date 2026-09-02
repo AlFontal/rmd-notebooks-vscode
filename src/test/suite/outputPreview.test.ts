@@ -18,11 +18,14 @@ describe("outputPreview", () => {
     assert.equal(preview, "[1] 2 [1] 3");
   });
 
-  it("adds state and stderr markers to the preview", () => {
+  it("distinguishes execution errors from stderr streams in the preview", () => {
     const preview = formatInlinePreview(
-      createRecord([{ type: "error", text: "object 'y' not found" }], { status: "error", stale: true })
+      createRecord([
+        { type: "stream", name: "stderr", text: "a warning" },
+        { type: "error", text: "object 'y' not found" }
+      ], { status: "error", stale: true })
     );
-    assert.equal(preview, "[stale]  [stderr] object 'y' not found");
+    assert.equal(preview, "[stale]  [stderr] a warning  [error] object 'y' not found");
   });
 
   it("returns responsive image sizes bounded by configured maxima", () => {

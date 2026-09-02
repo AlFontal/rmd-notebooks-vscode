@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { afterEach, before, beforeEach, describe, it } from "mocha";
 import * as vscode from "vscode";
-import { PreviewServices, previewNotebookHtml } from "../../../src/commands/previewHtml";
+import { PreviewServices, previewNotebookHtml, withQuartoPython } from "../../../src/commands/previewHtml";
 
 interface InlineChunksExtensionApi {
   getDocumentState(documentUri: string): Promise<{
@@ -33,6 +33,13 @@ interface InlineChunksExtensionApi {
       description?: string;
     }>;
   }>;
+  getPythonEnvironmentState(documentUri: string): {
+    initialized: boolean;
+    environments: Array<{ id: string; path: string; label: string }>;
+    selectedPath?: string;
+  };
+  getSelectedPythonRenderPath(documentUri: string): string | undefined;
+  selectTestPythonInterpreter(documentUri: string, executable: string, selectionId?: string): Promise<void>;
 }
 
 let extensionApi: InlineChunksExtensionApi;
@@ -143,6 +150,7 @@ describe("Rmd Notebooks Notebook Host", () => {
 
   it("routes saved notebook previews and restores Rmd notebook view after failures", async () => {
     const calls: string[] = [];
+    let previewPython: string | undefined;
     const services: PreviewServices = {
       ensureIntegration: async (extensionId, commandId) => {
         calls.push(`ensure:${extensionId}:${commandId}`);
@@ -150,6 +158,9 @@ describe("Rmd Notebooks Notebook Host", () => {
       },
       executeCommand: async (commandId) => {
         calls.push(`execute:${commandId}`);
+        if (commandId === "quarto.preview") {
+          previewPython = process.env.QUARTO_PYTHON;
+        }
         if (commandId === "r.rmarkdown.showPreviewToSide") {
           throw new Error("preview failed");
         }
@@ -168,6 +179,7 @@ describe("Rmd Notebooks Notebook Host", () => {
     const qmdResult = await previewNotebookHtml(
       {
         uri: vscode.Uri.file("/tmp/preview.qmd"),
+        pythonPath: "/env/bin/python",
         save: async () => {
           calls.push("save:qmd");
           return true;
@@ -176,6 +188,7 @@ describe("Rmd Notebooks Notebook Host", () => {
       services
     );
     assert.equal(qmdResult, "previewed");
+    assert.equal(previewPython, "/env/bin/python");
     assert.deepEqual(calls.slice(0, 5), [
       "save:qmd",
       "ensure:quarto.quarto:quarto.preview",
@@ -204,6 +217,34 @@ describe("Rmd Notebooks Notebook Host", () => {
       "execute:r.rmarkdown.showPreviewToSide",
       "restoreNotebook"
     ]);
+  });
+
+  it("serializes scoped Quarto Python overrides and restores the process environment", async () => {
+    const previous = process.env.QUARTO_PYTHON;
+    const observations: string[] = [];
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = withQuartoPython("/env/one/python", async () => {
+      observations.push(process.env.QUARTO_PYTHON ?? "missing");
+      firstStarted();
+      await hold;
+    });
+    await started;
+    const second = withQuartoPython("/env/two/python", async () => {
+      observations.push(process.env.QUARTO_PYTHON ?? "missing");
+    });
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    assert.deepEqual(observations, ["/env/one/python", "/env/two/python"]);
+    assert.equal(process.env.QUARTO_PYTHON, previous);
   });
 
   it("does not preview when saving is cancelled or an integration is missing", async () => {
@@ -295,6 +336,423 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.equal(state.snapshot?.chunkIds.length, 3);
     assert.ok(state.outputs.some((record) => record.outputTypes.includes("text")));
     assert.match(state.outputChannelText, /integration\.rmd[\s\S]*\[stdout\][\s\S]*\[1\] 2/i);
+  });
+
+  it("skips eval-false Python chunks without starting environment discovery", async () => {
+    await writeFixture(
+      "python-skip-without-discovery.qmd",
+      "```{python}\n#| eval: false\nraise RuntimeError('must not run')\n```\n"
+    );
+    const uri = getWorkspaceFileUri("python-skip-without-discovery.qmd");
+    const notebook = await vscode.workspace.openNotebookDocument(uri);
+    await vscode.window.showNotebookDocument(notebook);
+
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(uri, (candidate) =>
+      candidate.outputs.length === 1 && candidate.outputs[0].status === "success"
+    );
+    const environmentState = extensionApi.getPythonEnvironmentState(uri.toString());
+
+    assert.equal(environmentState.initialized, false);
+    assert.equal(environmentState.selectedPath, undefined);
+    assert.deepEqual(state.outputs[0].outputTypes, []);
+    assert.ok(!state.outputChannelText.includes("must not run"));
+  });
+
+  it("runs Python chunks in a persistent qmd session and renders rich output", async () => {
+    await writeFixture(
+      "python-integration.qmd",
+      [
+        "# Python integration",
+        "",
+        "```{python setup}",
+        "shared_value = 40",
+        "print('python ready')",
+        "```",
+        "",
+        "```{python dependent}",
+        "print(f'answer={shared_value + 2}')",
+        "```",
+        "",
+        "```{python rich}",
+        "class RichValue:",
+        "    def _repr_html_(self):",
+        "        return '<strong>python html</strong>'",
+        "RichValue()",
+        "```",
+        "",
+        "```{python mimebundle}",
+        "import base64",
+        "class MimeBundlePlot:",
+        "    def _repr_mimebundle_(self, **_kwargs):",
+        "        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z2S8AAAAASUVORK5CYII=')",
+        "        return ({'image/png': png}, {'image/png': {'width': 1, 'height': 1}})",
+        "MimeBundlePlot()",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-integration.qmd");
+    const pythonCells = editor.notebook.getCells().filter((cell) => cell.document.languageId === "python");
+    assert.equal(pythonCells.length, 4);
+
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.filter((record) => record.status === "success").length === 4
+    );
+
+    assert.ok(state.outputChannelText.includes("python ready"));
+    assert.ok(state.outputChannelText.includes("answer=42"));
+    assert.ok(state.outputs.some((record) => record.outputTypes.includes("display")));
+
+    const richCell = pythonCells[2];
+    const renderedRichCell = await waitForNotebookOutput(richCell, (cell) =>
+      cell.outputs.some((output) => output.items.some((item) => item.mime === "text/html"))
+    );
+    assert.ok(notebookOutputText(renderedRichCell, "text/html").includes("python html"));
+    assert.equal(await waitForExecutionOrder(editor.notebook.uri, pythonCells[0].index), 1);
+    assert.equal(await waitForExecutionOrder(editor.notebook.uri, pythonCells[2].index), 3);
+
+    const environmentState = extensionApi.getPythonEnvironmentState(editor.notebook.uri.toString());
+    assert.equal(environmentState.selectedPath, requireTestPython());
+
+    await waitForNotebookOutput(pythonCells[3], (cell) =>
+      cell.outputs.some((output) => output.items.some((item) => item.mime === "image/png"))
+    );
+
+    assert.ok(await editor.notebook.save());
+    const saved = Buffer.from(await vscode.workspace.fs.readFile(editor.notebook.uri)).toString("utf8");
+    assert.ok(saved.includes("```{python setup}"));
+    assert.ok(saved.includes("shared_value = 40"));
+  });
+
+  it("preserves Python stream and rich-display event order with complete MIME bundles", async () => {
+    await writeFixture(
+      "python-output-order.qmd",
+      [
+        "```{python ordered}",
+        "print('before display')",
+        "from IPython.display import display",
+        "display({'text/plain': 'plain alternative', 'text/html': '<b>rich alternative</b>'}, raw=True)",
+        "print('after display')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-output-order.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    const cell = await waitForNotebookOutput(editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook)), (candidate) =>
+      candidate.outputs.length === 3
+    );
+
+    assert.equal(cell.outputs[0].items[0]?.mime, "application/vnd.code.notebook.stdout");
+    assert.deepEqual(cell.outputs[1].items.map((item) => item.mime).sort(), ["text/html", "text/plain"]);
+    assert.equal(cell.outputs[2].items[0]?.mime, "application/vnd.code.notebook.stdout");
+    assert.ok(Buffer.from(cell.outputs[0].items[0].data).toString("utf8").includes("before display"));
+    assert.ok(Buffer.from(cell.outputs[2].items[0].data).toString("utf8").includes("after display"));
+  });
+
+  it("keeps successful stderr suppressible while preserving real Python errors", async () => {
+    await writeFixture(
+      "python-stderr.qmd",
+      [
+        "```{python visible-stderr}",
+        "import sys",
+        "print('visible diagnostic', file=sys.stderr)",
+        "```",
+        "",
+        "```{python hidden-stderr}",
+        "#| output: false",
+        "print('hidden diagnostic', file=sys.stderr)",
+        "```",
+        "",
+        "```{python real-error}",
+        "#| output: false",
+        "raise RuntimeError('real failure')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-stderr.qmd");
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.length === 3 && candidate.outputs.every((record) => record.status !== "running")
+    );
+    const cells = editor.notebook.getCells().filter((cell) => cell.document.languageId === "python");
+    const visibleCell = await waitForNotebookOutput(cells[0], (cell) =>
+      cell.outputs.some((output) => output.items.some(
+        (item) => item.mime === "application/vnd.code.notebook.stderr"
+      ))
+    );
+
+    assert.deepEqual(state.outputs[0].outputTypes, ["stream"]);
+    assert.deepEqual(state.outputs[1].outputTypes, []);
+    assert.equal(state.outputs[1].status, "success");
+    assert.deepEqual(state.outputs[2].outputTypes, ["error"]);
+    assert.equal(state.outputs[2].status, "error");
+    assert.ok(notebookOutputText(visibleCell, "application/vnd.code.notebook.stderr").includes("visible diagnostic"));
+    assert.ok(state.outputChannelText.includes("visible diagnostic"));
+    assert.ok(!state.outputChannelText.includes("hidden diagnostic"));
+    assert.ok(state.outputChannelText.includes("real failure"));
+  });
+
+  it("honors leading Quarto cell options when running all Python chunks", async () => {
+    await writeFixture(
+      "python-quarto-options.qmd",
+      [
+        "```{python}",
+        "#| label: skipped-python",
+        "#| eval: false",
+        "raise RuntimeError('should not execute')",
+        "```",
+        "",
+        "```{python}",
+        "print('quarto options continued')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-quarto-options.qmd");
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.filter((record) => record.status === "success").length === 2
+    );
+
+    assert.ok(state.outputChannelText.includes("quarto options continued"));
+    assert.ok(!state.outputChannelText.includes("should not execute"));
+    assert.deepEqual(state.outputs[0].outputTypes, []);
+  });
+
+  it("runs standalone Python notebooks from their source directory with IPython syntax", async () => {
+    const directory = vscode.Uri.file(`/tmp/rmd-notebooks-python-cwd-${process.pid}`);
+    const notebookUri = vscode.Uri.joinPath(directory, "source-dir.qmd");
+    await vscode.workspace.fs.createDirectory(directory);
+    try {
+      await vscode.workspace.fs.writeFile(
+        vscode.Uri.joinPath(directory, "sibling_helper.py"),
+        Buffer.from("VALUE = 42\n", "utf8")
+      );
+      await vscode.workspace.fs.writeFile(
+        notebookUri,
+        Buffer.from(
+          [
+            "```{python}",
+            "magic_pwd = %pwd",
+            "import asyncio",
+            "await asyncio.sleep(0)",
+            "from sibling_helper import VALUE",
+            "print(f'cwd={magic_pwd}')",
+            "print(f'sibling={VALUE}')",
+            "```",
+            ""
+          ].join("\n"),
+          "utf8"
+        )
+      );
+
+      const notebook = await vscode.workspace.openNotebookDocument(notebookUri);
+      const editor = await vscode.window.showNotebookDocument(notebook);
+      await extensionApi.selectTestPythonInterpreter(notebook.uri.toString(), requireTestPython());
+      editor.selection = singleCellRange(findFirstCodeCellIndex(notebook));
+      await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+      const state = await waitForDocumentState(notebook.uri, (candidate) =>
+        candidate.outputs.some((record) => record.status === "success" && record.outputTypes.includes("text"))
+      );
+
+      assert.ok(state.outputChannelText.includes(`rmd-notebooks-python-cwd-${process.pid}`));
+      assert.ok(state.outputChannelText.includes("sibling=42"));
+    } finally {
+      await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+      await vscode.workspace.fs.delete(directory, { recursive: true });
+    }
+  });
+
+  it("scopes Quarto Python alignment to unpinned Python-only notebooks", async () => {
+    await writeFixture("preview-python-only.qmd", "```{python}\n1 + 1\n```\n");
+    let editor = await openNotebookEditor("preview-python-only.qmd");
+    assert.equal(extensionApi.getSelectedPythonRenderPath(editor.notebook.uri.toString()), requireTestPython());
+
+    await writeFixture("preview-mixed.qmd", "```{r}\n1 + 1\n```\n\n```{python}\n1 + 1\n```\n");
+    editor = await openNotebookEditor("preview-mixed.qmd");
+    assert.equal(extensionApi.getSelectedPythonRenderPath(editor.notebook.uri.toString()), undefined);
+
+    await writeFixture(
+      "preview-pinned.qmd",
+      "---\njupyter: python3\n---\n\n```{python}\n1 + 1\n```\n"
+    );
+    editor = await openNotebookEditor("preview-pinned.qmd");
+    assert.equal(extensionApi.getSelectedPythonRenderPath(editor.notebook.uri.toString()), undefined);
+  });
+
+  it("discovers Python environments for standalone qmd notebook documents", async () => {
+    const uri = vscode.Uri.file(`/tmp/rmd-notebooks-standalone-${process.pid}.qmd`);
+    await vscode.workspace.fs.writeFile(
+      uri,
+      Buffer.from("```{python}\nimport sys\nsys.executable\n```\n", "utf8")
+    );
+    const notebook = await vscode.workspace.openNotebookDocument(uri);
+    await vscode.window.showNotebookDocument(notebook);
+
+    const selector = vscode.commands.executeCommand("rmdNotebooks.selectPythonEnvironment", notebook.uri.toString());
+
+    const environmentState = await waitFor(() => {
+      const state = extensionApi.getPythonEnvironmentState(notebook.uri.toString());
+      return state.initialized && state.environments.length > 1 ? state : undefined;
+    });
+    assert.ok(environmentState.environments.some((environment) => environment.path !== "python3"));
+    await vscode.commands.executeCommand("workbench.action.closeQuickOpen");
+    await selector;
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    await vscode.workspace.fs.delete(uri);
+  });
+
+  it("switches Python interpreters and resets the document session", async () => {
+    await writeFixture(
+      "python-kernel-switch.qmd",
+      [
+        "# Python kernel switch",
+        "",
+        "```{python assign}",
+        "kernel_switch_value = 42",
+        "```",
+        "",
+        "```{python read}",
+        "kernel_switch_value",
+        "```",
+        ""
+      ].join("\n")
+    );
+    const editor = await openNotebookEditor("python-kernel-switch.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    await waitForDocumentState(editor.notebook.uri, (state) =>
+      state.outputs.some((record) => record.status === "success")
+    );
+
+    const testPython = requireTestPython();
+    await extensionApi.selectTestPythonInterpreter(editor.notebook.uri.toString(), testPython, "switched-environment");
+    await waitFor(() =>
+      extensionApi.getPythonEnvironmentState(editor.notebook.uri.toString()).selectedPath === testPython
+        ? true
+        : undefined
+    );
+    assert.equal(vscode.workspace.getConfiguration("rmdNotebooks").inspect("python.path")?.workspaceValue, undefined);
+
+    editor.selection = singleCellRange(findLastCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "error")
+    );
+    assert.ok(state.outputChannelText.includes("NameError"));
+  });
+
+  it("handles Python input() through the notebook prompt UI", async () => {
+    await writeFixture(
+      "python-input.qmd",
+      [
+        "# Python input",
+        "",
+        "```{python prompt}",
+        "package = input('Package name? ')",
+        "print(f'value={package}')",
+        "```",
+        ""
+      ].join("\n")
+    );
+    extensionApi.setTestPromptResponses([{ value: "polars" }]);
+
+    const editor = await openNotebookEditor("python-input.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success" && record.outputTypes.includes("text"))
+    );
+    const requests = extensionApi.takeTestPromptRequests();
+    assert.ok(requests.some((request) => request.kind === "input" && request.prompt.includes("Package name?")));
+    assert.ok(state.outputChannelText.includes("value=polars"));
+  });
+
+  it("restarts the per-document Python session", async () => {
+    await writeFixture(
+      "python-restart.qmd",
+      [
+        "# Python restart",
+        "",
+        "```{python assigner}",
+        "python_restart_value = 41",
+        "```",
+        "",
+        "```{python reader}",
+        "python_restart_value + 1",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-restart.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "success")
+    );
+
+    await vscode.commands.executeCommand("rmdNotebooks.restartSession");
+    editor.selection = singleCellRange(findLastCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.status === "error")
+    );
+    assert.ok(state.outputChannelText.includes("NameError"));
+  });
+
+  it("interrupts Python execution and keeps the session usable", async () => {
+    await writeFixture(
+      "python-interrupt.qmd",
+      [
+        "# Python interrupt",
+        "",
+        "```{python slow}",
+        "import time",
+        "time.sleep(10)",
+        "print('should not finish')",
+        "```",
+        "",
+        "```{python recovery}",
+        "print('python recovered')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-interrupt.qmd");
+    const uri = editor.notebook.uri.toString();
+    const initial = await extensionApi.getDocumentState(uri);
+    const [slowId, recoveryId] = initial.snapshot?.chunkIds ?? [];
+    assert.ok(slowId && recoveryId);
+
+    const slowRun = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, slowId);
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === slowId && record.status === "running")
+    );
+    await vscode.commands.executeCommand("rmdNotebooks.interruptSession", uri);
+    await slowRun;
+    await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === slowId && record.status === "cancelled")
+    );
+
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk", uri, recoveryId);
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.some((record) => record.chunkId === recoveryId && record.status === "success")
+    );
+    assert.ok(state.outputChannelText.includes("python recovered"));
+    assert.ok(!state.outputChannelText.includes("should not finish"));
   });
 
   it("runs an html-producing qmd cell and renders html inline", async () => {
@@ -1888,7 +2346,17 @@ describe("Rmd Notebooks Notebook Host", () => {
 async function openNotebookEditor(name: string): Promise<vscode.NotebookEditor> {
   const uri = getWorkspaceFileUri(name);
   const notebook = await vscode.workspace.openNotebookDocument(uri);
-  return vscode.window.showNotebookDocument(notebook);
+  const editor = await vscode.window.showNotebookDocument(notebook);
+  if (notebook.getCells().some((cell) => ["python", "py"].includes(cell.document.languageId.toLowerCase()))) {
+    await extensionApi.selectTestPythonInterpreter(notebook.uri.toString(), requireTestPython());
+  }
+  return editor;
+}
+
+function requireTestPython(): string {
+  const executable = process.env.RMD_NOTEBOOKS_TEST_PYTHON?.trim();
+  assert.ok(executable, "RMD_NOTEBOOKS_TEST_PYTHON must name an IPython-capable interpreter.");
+  return executable;
 }
 
 async function resetIntegrationFixtures(): Promise<void> {
@@ -1925,6 +2393,9 @@ async function resetTestSettings(): Promise<void> {
   await updateTestSetting("r.args", undefined);
   await updateTestSetting("r.sourceVscodeRSessionWatcher", false);
   await updateTestSetting("r.startupTimeoutMs", undefined);
+  await updateTestSetting("python.path", undefined);
+  await updateTestSetting("python.args", undefined);
+  await updateTestSetting("python.startupTimeoutMs", undefined);
   await updateTestSetting("execution.interactiveFallbackTimeoutMs", 0);
   await updateTestSetting("execution.interactiveFallbackBehavior", "prompt");
   await updateTestSetting("output.dataFrameRender", undefined);

@@ -49,6 +49,10 @@ export class OutputChannelController implements vscode.Disposable {
     return this.transcript.join("\n");
   }
 
+  public logDiagnostic(message: string): void {
+    this.appendBlock(["# Python environment discovery", message, ""]);
+  }
+
   public dispose(): void {
     this.channel.dispose();
   }
@@ -95,7 +99,13 @@ function formatOutputs(record: ChunkOutputRecord): string[] {
     }
 
     if (output.type === "error") {
-      lines.push("[stderr]");
+      lines.push("[error]");
+      lines.push(output.text);
+      continue;
+    }
+
+    if (output.type === "stream") {
+      lines.push(`[${output.name}]`);
       lines.push(output.text);
       continue;
     }
@@ -114,6 +124,11 @@ function formatOutputs(record: ChunkOutputRecord): string[] {
     if (output.type === "markdown") {
       lines.push("[markdown]");
       lines.push(output.markdown);
+      continue;
+    }
+
+    if (output.type === "display") {
+      lines.push(`[display: ${output.items.map((item) => item.mimeType).join(", ")}]`);
     }
   }
 

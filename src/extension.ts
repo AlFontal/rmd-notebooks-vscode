@@ -2,8 +2,10 @@ import * as vscode from "vscode";
 import { registerCommands } from "./commands/registerCommands";
 import { OutputChannelController } from "./editor/outputChannelController";
 import { ExecutorRegistry } from "./execution/executorRegistry";
+import { PythonExecutor } from "./execution/pythonExecutor";
 import { RExecutor } from "./execution/rExecutor";
 import { RTerminalRunner } from "./execution/rTerminalRunner";
+import { PythonEnvironmentDiscovery } from "./integration/pythonEnvironmentDiscovery";
 import { maybeRecommendRExtension } from "./integration/rExtensionRecommendation";
 import { InlineChunksCellStatusBarProvider } from "./notebook/cellStatusBarProvider";
 import { InlineChunksNotebookRuntime } from "./notebook/notebookRuntime";
@@ -41,6 +43,13 @@ export interface InlineChunksExtensionApi {
       description?: string;
     }>;
   }>;
+  getPythonEnvironmentState(documentUri: string): {
+    initialized: boolean;
+    environments: Array<{ id: string; path: string; label: string }>;
+    selectedPath?: string;
+  };
+  getSelectedPythonRenderPath(documentUri: string): string | undefined;
+  selectTestPythonInterpreter(documentUri: string, executable: string, selectionId?: string): Promise<void>;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<InlineChunksExtensionApi> {
@@ -48,10 +57,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
   const outputStore = new OutputStore(context);
   const executorRegistry = new ExecutorRegistry();
   const rExecutor = new RExecutor(context.extensionUri);
+  const pythonExecutor = new PythonExecutor(context.extensionUri);
   const terminalRunner = new RTerminalRunner();
   executorRegistry.register(rExecutor);
+  executorRegistry.register(pythonExecutor);
 
-  const notebookRuntime = new InlineChunksNotebookRuntime(outputStore, executorRegistry, outputChannelController, terminalRunner);
+  const pythonEnvironmentDiscovery = new PythonEnvironmentDiscovery();
+  const notebookRuntime = new InlineChunksNotebookRuntime(
+    outputStore,
+    executorRegistry,
+    outputChannelController,
+    terminalRunner,
+    pythonExecutor,
+    pythonEnvironmentDiscovery,
+    context.workspaceState
+  );
   const cellStatusBarProvider = new InlineChunksCellStatusBarProvider(notebookRuntime);
 
   context.subscriptions.push(
@@ -62,8 +82,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
     }),
     vscode.notebooks.registerNotebookCellStatusBarItemProvider(INLINE_CHUNKS_NOTEBOOK_TYPE, cellStatusBarProvider),
     notebookRuntime,
+    pythonEnvironmentDiscovery,
     ...registerCommands(notebookRuntime),
-    new vscode.Disposable(() => void rExecutor.disposeAll())
+    new vscode.Disposable(() => void Promise.all(executorRegistry.all().map((executor) => executor.disposeAll?.())))
   );
 
   await notebookRuntime.initialize();
@@ -80,7 +101,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
         }))
       ),
     clearTestPromptResponses: () => notebookRuntime.clearTestPromptResponses(),
-    takeTestPromptRequests: () => notebookRuntime.takeTestPromptRequests()
+    takeTestPromptRequests: () => notebookRuntime.takeTestPromptRequests(),
+    getPythonEnvironmentState: (documentUri) => notebookRuntime.getPythonEnvironmentState(documentUri),
+    getSelectedPythonRenderPath: (documentUri) => notebookRuntime.getSelectedPythonRenderPath(documentUri),
+    selectTestPythonInterpreter: (documentUri, executable, selectionId) =>
+      notebookRuntime.selectTestPythonInterpreter(documentUri, executable, selectionId)
   };
 }
 

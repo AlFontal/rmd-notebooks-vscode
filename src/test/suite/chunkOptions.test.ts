@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { applyChunkOptionsToResult, parseChunkOptions } from "../../../src/notebook/chunkOptions";
+import { applyChunkOptionsToResult, parseChunkOptions, parseQuartoCellOptions } from "../../../src/notebook/chunkOptions";
 
 describe("chunkOptions", () => {
   it("parses common boolean options and results mode", () => {
@@ -40,6 +40,32 @@ describe("chunkOptions", () => {
     );
   });
 
+  it("parses leading Quarto cell options conservatively", () => {
+    assert.deepEqual(
+      parseQuartoCellOptions([
+        "#| label: foo",
+        "#| eval: false",
+        "#| include: false",
+        "#| output: false",
+        "#| fig-width: 8",
+        "#| fig-height: 5",
+        "#| fig-asp: 0.5",
+        "#| fig-dpi: 144",
+        "print('ignored')"
+      ].join("\n")),
+      { label: "foo", eval: false, include: false, output: false, figWidth: 8, figHeight: 5, figAsp: 0.5, dpi: 144 }
+    );
+  });
+
+  it("lets Quarto cell options override header options", () => {
+    const merged = {
+      ...parseChunkOptions("python, eval=TRUE, fig.width=3"),
+      ...parseQuartoCellOptions("#| eval: false\n#| fig-width: 8\nprint('x')")
+    };
+    assert.equal(merged.eval, false);
+    assert.equal(merged.figWidth, 8);
+  });
+
   it("suppresses all successful outputs when include=FALSE", () => {
     const result = applyChunkOptionsToResult(
       {
@@ -48,6 +74,7 @@ describe("chunkOptions", () => {
         finishedAt: 2,
         items: [
           { type: "text", text: "hello" },
+          { type: "stream", name: "stderr", text: "diagnostic" },
           { type: "html", html: "<strong>hello</strong>" },
           { type: "image", path: "/tmp/plot.png", mimeType: "image/png" }
         ]
@@ -56,6 +83,23 @@ describe("chunkOptions", () => {
     );
 
     assert.deepEqual(result.items, []);
+  });
+
+  it("suppresses successful stderr streams but preserves real execution errors", () => {
+    const result = applyChunkOptionsToResult(
+      {
+        success: true,
+        startedAt: 1,
+        finishedAt: 2,
+        items: [
+          { type: "stream", name: "stderr", text: "diagnostic" },
+          { type: "error", text: "formatter failed" }
+        ]
+      },
+      { output: false }
+    );
+
+    assert.deepEqual(result.items, [{ type: "error", text: "formatter failed" }]);
   });
 
   it("suppresses text and html for results='hide' but keeps plots", () => {

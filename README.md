@@ -8,11 +8,11 @@
   <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/AlFontal/rmd-notebooks-vscode/ci.yml?branch=main&label=ci" />
   <a href="https://marketplace.visualstudio.com/items?itemName=AlFontal.rmd-notebooks-vscode"><img alt="Install for VS Code" src="https://img.shields.io/badge/install-for%20VS%20Code-007ACC?logo=visualstudiocode&logoColor=white" /></a>
   <a href="https://open-vsx.org/extension/AlFontal/rmd-notebooks-vscode"><img alt="Install for Positron" src="https://img.shields.io/badge/install-for%20Positron-447099" /></a>
-  <img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-%5E1.88-007ACC?logo=visualstudiocode&logoColor=white" />
+  <img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-%5E1.110-007ACC?logo=visualstudiocode&logoColor=white" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-2E8B57" />
 </p>
 
-Run `.Rmd` and `.qmd` files as source-preserving notebooks in VS Code, with inline R execution, persisted outputs, plots, data-frame tables, and vscode-R workspace integration.
+Run `.Rmd` and `.qmd` files as source-preserving notebooks in VS Code, with interactive R and Python execution, persisted outputs, plots, rich tables, and vscode-R workspace integration.
 
 Rmd Notebooks opens R Markdown and Quarto documents as runnable notebooks without converting the file on disk. Code cells come from fenced chunks, outputs render inline, and the original source remains available whenever you want to inspect or edit it directly.
 
@@ -28,28 +28,49 @@ Rmd Notebooks opens R Markdown and Quarto documents as runnable notebooks withou
 
 ## Requirements
 
-- VS Code-compatible editor API `^1.88.0`
-- R available on your PATH, or configured with `rmdNotebooks.r.path`
+- VS Code-compatible editor API `^1.110.0`
+- R available on your PATH, or configured with `rmdNotebooks.r.path`, for R chunks
+- Python available on your PATH, or configured with `rmdNotebooks.python.path`, for Python chunks
+- IPython in that Python environment for all Python chunk execution, including magics, top-level `await`, `display()`, and rich output
 
 The VS Code Marketplace package installs the [vscode-R extension](https://marketplace.visualstudio.com/items?itemName=REditorSupport.r) automatically for normal R tooling integration, including the R workspace viewer. The Open VSX package keeps vscode-R optional so Positron and other VS Code-compatible editors that provide their own R support can install Rmd Notebooks without an incompatible dependency.
 
 ## What It Does
 
 - Opens `.Rmd`, `.rmd`, and `.qmd` files as notebooks
-- Runs R chunks in a persistent per-document R session, queueing rapid requests in execution order
+- Runs R and Python chunks in persistent per-document sessions, queueing rapid requests in execution order
+- Uses IPython for magics, shell escapes, top-level `await`, ordered `display()` output, display updates, and registered rich formatters
+- Discovers interpreters lazily from the global Python Environments catalog, including for standalone qmd files
 - Evaluates inline chunks in `.GlobalEnv`, so user variables are normal R workspace variables
 - Honors normal R startup files by default, including project `.Rprofile` files used by tools such as `renv`
-- Shows inline stdout, stderr, HTML snippets, static PNG plots, and theme-aware data-frame tables
+- Shows inline stdout, stderr, HTML/Markdown representations, static PNG plots, and rich data-frame tables
 - Evaluates native knitr and Quarto inline R expressions inside rendered prose cells
-- Shows execution-order badges per notebook and resets them when its R session restarts
+- Shows execution-order badges per notebook and language session, and resets them when sessions restart
 - Persists outputs and restores them when the document is reopened
 - Marks outputs stale after code edits
 - Supports cancelling an individual running or queued cell, plus Stop All for the active notebook run
 - Supports notebook commands for run current chunk, run all chunks, restart session, clear outputs, and source view
 - Opens `.Rmd` HTML previews through vscode-R and `.qmd` previews through Quarto without leaving notebook view
 - Supports chunk-header editing from notebook mode
-- Handles common prompt-style interactions such as `menu()` and `readline()` with VS Code UI
+- Handles common prompt-style interactions such as R `menu()`/`readline()` and Python `input()` with VS Code UI
 - Lets unsupported interactive chunks fall back to an R terminal when the optional timeout is enabled
+
+Python chunks use the selected interpreter directly and run from the source file's directory, so sibling imports and relative paths behave like Quarto. IPython is required; if it is missing, Rmd Notebooks offers to install it in the selected environment. Pandas, Matplotlib, Plotnine, and other libraries then render through their normal IPython formatters. Complete MIME bundles are preserved, and stream plus IPython rich-display events retain their execution order.
+
+## Python Environment Selection
+
+Use **Rmd Notebooks: Select Python Environment** from the Command Palette or click the always-visible `Python: <environment>` status-bar control. Results appear immediately and fuzzy-match environment names, versions, managers, and paths. Rmd Notebooks automatically selects the file/workspace-active environment initially and remembers explicit choices per document.
+
+The Marketplace package installs the Python Environments integration automatically. In hosts where it is unavailable, `rmdNotebooks.python.path`, `QUARTO_PYTHON`, manual selection, and the platform PATH fallback remain available. Changing environments disposes the old per-document Python session and starts a fresh session on the next run.
+
+Rmd Notebooks does not rewrite `jupyter:` frontmatter or treat kernelspecs as execution environments. For a Python-only qmd file without an explicit `jupyter:` pin, extension-triggered Quarto previews receive the selected interpreter through a scoped `QUARTO_PYTHON` override. Mixed R/Python documents and explicitly pinned documents remain under Quarto's own runtime rules.
+
+Verify the selected environment from a Python chunk:
+
+```python
+import sys
+sys.executable
+```
 
 ## Workspace Viewer
 
@@ -75,10 +96,11 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 
 ## Current Limits
 
-- R is the only supported execution language
-- Plots are captured as static PNG images
+- Rich Python outputs preserve every MIME alternative emitted by IPython; Matplotlib and Plotnine plots render inline
+- Matplotlib figures that require the static PNG fallback are appended after the cell finishes, so their position relative to later stream output is not guaranteed
+- Jupyter widgets and other comm-channel-based outputs are not supported; they require a full Jupyter kernel and frontend comm lifecycle
 - htmlwidgets and full HTML dependency lifecycles are not supported yet
-- Only a subset of knitr options is enforced today: `eval=FALSE`, `include=FALSE`, `results='hide'`, `fig.width`, `fig.height`, `fig.asp`, and `dpi`
+- Common knitr header options and leading Quarto `#|` options are enforced, including `eval`, `include`, `output`, figure size/aspect/DPI, and output hiding
 - `echo`, `warning`, and `message` are parsed but not fully enforced
 - Unsupported interactive flows can fall back to an R terminal only when `rmdNotebooks.execution.interactiveFallbackTimeoutMs` is enabled
 - vscode-R workspace integration is optional on Open VSX builds and depends on vscode-R's current session watcher internals
@@ -91,14 +113,15 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 - `Rmd Notebooks: Stop All Running Chunks`
 - `Rmd Notebooks: Clear Current Output`
 - `Rmd Notebooks: Clear All Outputs`
-- `Rmd Notebooks: Restart R Session`
+- `Rmd Notebooks: Restart Execution Sessions`
+- `Rmd Notebooks: Select Python Environment`
 - `Rmd Notebooks: Run Current Chunk in R Terminal`
 - `Rmd Notebooks: Show Output Panel`
 - `Rmd Notebooks: Preview HTML`
 - `Rmd Notebooks: Edit Chunk Header`
 - `Rmd Notebooks: Toggle Notebook / Raw Source View`
 
-The notebook toolbar also exposes `Stop All Running Chunks`, `Restart R Session`, and `View Source`.
+The notebook toolbar exposes `Stop All Running Chunks`, `Restart Execution Sessions`, and `View Source`. Python selection stays available in the status bar and Command Palette without adding a second controller to the notebook kernel picker.
 
 ## Settings
 
@@ -107,11 +130,14 @@ The notebook toolbar also exposes `Stop All Running Chunks`, `Restart R Session`
 - `rmdNotebooks.r.terminalArgs`: arguments for the interactive R terminal. Defaults to `["--vanilla"]`.
 - `rmdNotebooks.r.sourceVscodeRSessionWatcher`: source `~/.vscode-R/init.R` in inline R sessions when present. Defaults to `true`; no-ops when vscode-R is not installed.
 - `rmdNotebooks.r.startupTimeoutMs`: time allowed for an inline R session to start. Defaults to `30000` milliseconds.
+- `rmdNotebooks.python.path`: configured interpreter fallback after a persisted or file/workspace-active Python environment; when empty, selection continues through `QUARTO_PYTHON` and then `python3` on macOS/Linux or `python` on Windows.
+- `rmdNotebooks.python.args`: arguments passed before the bundled Python session script. Defaults to `["-u"]`.
+- `rmdNotebooks.python.startupTimeoutMs`: time allowed for a Python session to start. Defaults to `30000` milliseconds.
 - `rmdNotebooks.execution.interactiveFallbackTimeoutMs`: timeout for treating a stalled inline chunk as unsupported interactive input. Defaults to `0`, which disables the timeout.
 - `rmdNotebooks.execution.interactiveFallbackBehavior`: what to do when the optional interactive fallback timeout fires. Defaults to `prompt`.
-- `rmdNotebooks.output.dataFrameRender`: render data frames as HTML tables instead of plain text. Defaults to `true`.
-- `rmdNotebooks.output.dataFrameMaxRows`: row threshold before HTML tables collapse to their first and last rows. Defaults to `50`.
-- `rmdNotebooks.output.dataFrameMaxColumns`: column threshold before HTML tables collapse to their first and last columns. Defaults to `50`.
+- `rmdNotebooks.output.dataFrameRender`: render R data frames as HTML tables instead of plain text. Defaults to `true`; Python data frames use IPython's formatter.
+- `rmdNotebooks.output.dataFrameMaxRows`: row threshold before R HTML tables collapse to their first and last rows. Defaults to `50`.
+- `rmdNotebooks.output.dataFrameMaxColumns`: column threshold before R HTML tables collapse to their first and last columns. Defaults to `50`.
 
 Inline R sessions honor normal startup files by default. To isolate inline sessions from project startup files, add `--vanilla`:
 
@@ -122,6 +148,18 @@ Inline R sessions honor normal startup files by default. To isolate inline sessi
 ```
 
 Rendered prose supports both native knitr syntax, such as `` `r value` ``, and Quarto syntax, such as `` `{r} value` ``. Inline prose requires the R package `knitr`; install it with `install.packages("knitr")` if it is not already available. Inline results are textual/Markdown values; plots and rich widgets remain regular chunk outputs.
+
+Python chunks use normal Quarto fences and share state within the document:
+
+````markdown
+```{python setup}
+values = [1, 2, 3]
+```
+
+```{python summary}
+sum(values)
+```
+````
 
 ## Development
 

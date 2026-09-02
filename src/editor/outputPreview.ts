@@ -30,7 +30,13 @@ export function formatInlinePreview(record: ChunkOutputRecord, maxCharacters = D
 
     if (output.type === "error") {
       const text = collapseWhitespace(output.text);
-      segments.push(text ? `[stderr] ${text}` : "[stderr]");
+      segments.push(text ? `[error] ${text}` : "[error]");
+      continue;
+    }
+
+    if (output.type === "stream") {
+      const text = collapseWhitespace(output.text);
+      segments.push(text ? `[${output.name}] ${text}` : `[${output.name}]`);
       continue;
     }
   }

@@ -11,6 +11,7 @@ export type PreviewResult = "previewed" | "cancelled" | "unsupported" | "missing
 export interface PreviewRequest {
   uri: vscode.Uri;
   viewColumn?: vscode.ViewColumn;
+  pythonPath?: string;
   save(): Thenable<boolean>;
 }
 
@@ -22,7 +23,9 @@ export interface PreviewServices {
   showWarning(message: string): Thenable<unknown>;
 }
 
-export async function previewActiveNotebookHtml(): Promise<PreviewResult> {
+let quartoPreviewTail: Promise<void> = Promise.resolve();
+
+export async function previewActiveNotebookHtml(pythonPath?: string): Promise<PreviewResult> {
   const editor = vscode.window.activeNotebookEditor;
   if (!editor || !isInlineChunksNotebook(editor.notebook)) {
     void vscode.window.showWarningMessage("Rmd Notebooks: open an .Rmd or .qmd notebook to preview it.");
@@ -33,6 +36,7 @@ export async function previewActiveNotebookHtml(): Promise<PreviewResult> {
     {
       uri: editor.notebook.uri,
       viewColumn: editor.viewColumn,
+      pythonPath,
       save: () => editor.notebook.save()
     },
     createPreviewServices()
@@ -57,7 +61,7 @@ export async function previewNotebookHtml(request: PreviewRequest, services: Pre
     }
     try {
       await services.openRawSource(request.uri, request.viewColumn);
-      await services.executeCommand(QUARTO_PREVIEW_COMMAND);
+      await withQuartoPython(request.pythonPath, () => services.executeCommand(QUARTO_PREVIEW_COMMAND));
       return "previewed";
     } finally {
       await services.restoreNotebook(request.uri, request.viewColumn);
@@ -74,6 +78,32 @@ export async function previewNotebookHtml(request: PreviewRequest, services: Pre
     return "previewed";
   } finally {
     await services.restoreNotebook(request.uri, request.viewColumn);
+  }
+}
+
+export async function withQuartoPython<T>(pythonPath: string | undefined, action: () => Thenable<T>): Promise<T> {
+  const previous = quartoPreviewTail.catch(() => undefined);
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  quartoPreviewTail = previous.then(() => current);
+  await previous;
+
+  const hadPrevious = Object.prototype.hasOwnProperty.call(process.env, "QUARTO_PYTHON");
+  const previousValue = process.env.QUARTO_PYTHON;
+  if (pythonPath) {
+    process.env.QUARTO_PYTHON = pythonPath;
+  }
+  try {
+    return await action();
+  } finally {
+    if (hadPrevious) {
+      process.env.QUARTO_PYTHON = previousValue;
+    } else {
+      delete process.env.QUARTO_PYTHON;
+    }
+    release();
   }
 }
 

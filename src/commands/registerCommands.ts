@@ -30,6 +30,9 @@ export function registerCommands(controller: InlineChunksNotebookRuntime): vscod
     vscode.commands.registerCommand("rmdNotebooks.restartSession", async (documentUri?: string) => {
       await controller.restartSession(documentUri);
     }),
+    vscode.commands.registerCommand("rmdNotebooks.selectPythonEnvironment", async (documentUri?: string) => {
+      await controller.selectPythonEnvironment(documentUri);
+    }),
     vscode.commands.registerCommand("rmdNotebooks.runCurrentChunkInTerminal", async (documentUri?: string, chunkId?: string) => {
       await controller.runCurrentChunkInTerminal(documentUri, chunkId);
     }),
@@ -37,7 +40,7 @@ export function registerCommands(controller: InlineChunksNotebookRuntime): vscod
       controller.showOutputChannel();
     }),
     vscode.commands.registerCommand("rmdNotebooks.previewHtml", async () => {
-      await previewActiveNotebookHtml();
+      await previewActiveNotebookHtml(controller.getSelectedPythonRenderPath());
     }),
     vscode.commands.registerCommand(
       "rmdNotebooks.editChunkHeader",
