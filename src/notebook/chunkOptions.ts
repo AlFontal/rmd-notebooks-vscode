@@ -1,16 +1,46 @@
 import { ExecutionResult } from "../execution/executorTypes";
 
 export interface ChunkOptions {
+  label?: string;
   eval?: boolean;
   echo?: boolean;
   include?: boolean;
   results?: string;
+  output?: boolean | string;
   warning?: boolean;
   message?: boolean;
   figWidth?: number;
   figHeight?: number;
   figAsp?: number;
   dpi?: number;
+}
+
+export function parseQuartoCellOptions(body: string): ChunkOptions {
+  const options: ChunkOptions = {};
+  const lines = body.replace(/\r\n/g, "\n").split("\n");
+  for (const line of lines) {
+    const match = line.match(/^\s*#\|\s*([A-Za-z0-9_.-]+)\s*:\s*(.*?)\s*$/);
+    if (!match) {
+      break;
+    }
+    const key = match[1].toLowerCase();
+    const rawValue = match[2];
+    if (!rawValue || /[\[\]{}]/.test(rawValue)) {
+      continue;
+    }
+    const booleanValue = parseBooleanOption(rawValue);
+    const numericValue = parseNumericOption(rawValue);
+    const stringValue = stripOuterQuotes(rawValue);
+    if (key === "label") options.label = stringValue;
+    else if (["eval", "include", "echo", "warning"].includes(key) && booleanValue !== undefined) {
+      options[key as "eval" | "include" | "echo" | "warning"] = booleanValue;
+    } else if (key === "output") options.output = booleanValue ?? stringValue.toLowerCase();
+    else if (key === "fig-width" && numericValue !== undefined) options.figWidth = numericValue;
+    else if (key === "fig-height" && numericValue !== undefined) options.figHeight = numericValue;
+    else if (key === "fig-asp" && numericValue !== undefined) options.figAsp = numericValue;
+    else if ((key === "fig-dpi" || key === "dpi") && numericValue !== undefined) options.dpi = numericValue;
+  }
+  return options;
 }
 
 export function parseChunkOptions(headerInfo: string): ChunkOptions {
@@ -86,6 +116,9 @@ export function applyChunkOptionsToResult(result: ExecutionResult, options: Chun
   }
 
   const items = result.items.filter((item) => {
+    if (result.success && options.output === false && item.type !== "error") {
+      return false;
+    }
     if (result.success && options.include === false && item.type !== "error") {
       return false;
     }
@@ -93,7 +126,7 @@ export function applyChunkOptionsToResult(result: ExecutionResult, options: Chun
     if (
       result.success &&
       options.results === "hide" &&
-      (item.type === "text" || item.type === "html" || item.type === "markdown" || item.type === "mime")
+      (item.type === "text" || item.type === "html" || item.type === "markdown" || item.type === "display")
     ) {
       return false;
     }

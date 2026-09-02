@@ -11,7 +11,7 @@ import {
   InteractivePromptResponse,
   PlotRenderOptions
 } from "../execution/executorTypes";
-import { CancelledExecutionError, InteractiveExecutionError } from "../execution/executionErrors";
+import { CancelledExecutionError, InteractiveExecutionError, MissingIPythonError } from "../execution/executionErrors";
 import { RTerminalRunner } from "../execution/rTerminalRunner";
 import { PythonExecutor } from "../execution/pythonExecutor";
 import {
@@ -27,7 +27,7 @@ import {
   isInlineChunksNotebook,
   withInlineChunksMetadata
 } from "./notebookTypes";
-import { applyChunkOptionsToResult, parseChunkOptions } from "./chunkOptions";
+import { applyChunkOptionsToResult, parseChunkOptions, parseQuartoCellOptions } from "./chunkOptions";
 import { buildChunkHeader, extractChunkLabel, normalizeChunkHeaderInfo, validateChunkHeaderInfo } from "./chunkHeader";
 import { parseJupyterFrontmatter } from "./frontmatter";
 import { buildInlineRExecutionCode, parseInlineRExpressions } from "./inlineR";
@@ -125,8 +125,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       this.pythonDiscovery.onDidChangeRuntimes(() => {
         this.logPythonDiscoveryState();
         this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
-      }),
-      this.pythonExecutor.onDidUsePythonFallback((event) => void this.handleMissingIPython(event))
+      })
     );
     this.disposables.push(this.pythonEnvironmentStatus);
     this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
@@ -185,6 +184,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
 
     await this.pythonDiscovery.ensureInitialized();
+    // The selector can complete while discovery is still in flight. Respect that
+    // explicit choice instead of replacing it with the newly reported active env.
+    if (this.pythonExecutor.getSelectedInterpreter(notebook.uri.toString())) {
+      return;
+    }
     const runtimes = this.pythonDiscovery.getRuntimes(notebook.uri);
     const activeEnvironmentId = await this.pythonDiscovery.getActiveEnvironmentId(notebook.uri);
     const selected =
@@ -276,6 +280,14 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     if (!notebook) {
       return undefined;
     }
+    const codeLanguages = new Set(
+      notebook.getCells()
+        .filter((cell) => cell.kind === vscode.NotebookCellKind.Code)
+        .map((cell) => cell.document.languageId.toLowerCase())
+    );
+    if (!codeLanguages.has("python") || codeLanguages.has("r") || getNotebookJupyterKernel(notebook)) {
+      return undefined;
+    }
     const selected = this.pythonExecutor.getSelectedInterpreter(notebook.uri.toString());
     if (selected?.renderPythonPath) {
       return selected.renderPythonPath;
@@ -292,32 +304,29 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
   }
 
-  private async handleMissingIPython(event: {
-    documentUri: string;
-    selection?: { id: string; path: string; prefixArgs?: string[] };
-  }): Promise<void> {
-    const choice = await vscode.window.showInformationMessage(
-      "This Python environment does not include IPython. Basic execution works, but magics and full rich output are unavailable.",
-      "Install IPython",
-      "Continue with Basic Python"
+  private async handleMissingIPython(documentUri: string): Promise<void> {
+    const selection = this.pythonExecutor.getSelectedInterpreter(documentUri);
+    const choice = await vscode.window.showErrorMessage(
+      "This Python environment does not include IPython. Python chunks require IPython for notebook execution.",
+      "Install IPython"
     );
     if (choice !== "Install IPython") {
       return;
     }
 
-    const installed = event.selection
-      ? await this.pythonDiscovery.installIPython(event.selection.id).catch(() => false)
+    const installed = selection
+      ? await this.pythonDiscovery.installIPython(selection.id).catch(() => false)
       : false;
     if (!installed) {
-      const executable = event.selection?.path ?? (process.platform === "win32" ? "python" : "python3");
-      const args = [...(event.selection?.prefixArgs ?? []), "-m", "pip", "install", "ipython"];
+      const executable = selection?.path ?? (process.platform === "win32" ? "python" : "python3");
+      const args = [...(selection?.prefixArgs ?? []), "-m", "pip", "install", "ipython"];
       const terminal = vscode.window.createTerminal("Install IPython");
       terminal.show(true);
       terminal.sendText([executable, ...args].map(quoteShellArgument).join(" "));
       return;
     }
 
-    await this.pythonExecutor.disposeSession(event.documentUri);
+    await this.pythonExecutor.disposeSession(documentUri);
     void vscode.window.showInformationMessage(
       "IPython was installed. Run the cell again to start an enhanced notebook session."
     );
@@ -490,13 +499,13 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     };
   }
 
-  public async selectTestPythonInterpreter(documentUri: string, executable: string): Promise<void> {
+  public async selectTestPythonInterpreter(documentUri: string, executable: string, selectionId = executable): Promise<void> {
     const notebook = this.resolveNotebook(documentUri);
     if (!notebook) {
       return;
     }
     await this.selectPythonRuntime(notebook, {
-      id: `manual:test:${executable}`,
+      id: `manual:test:${selectionId}`,
       label: "Test Python",
       source: "manual",
       executable,
@@ -836,6 +845,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       const resultPromise = executor.executeChunk({
         documentUri: notebook.uri.toString(),
         workspaceFolder: vscode.workspace.getWorkspaceFolder(notebook.uri)?.uri.fsPath,
+        workingDirectory: resolveExecutionDirectory(notebook),
         chunkId: entry.chunk.identity.chunkId,
         language: entry.chunk.language,
         code: isInline ? buildInlineRExecutionCode(cell.document.getText()) : cell.document.getText(),
@@ -873,6 +883,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
       return "completed";
     } catch (error) {
+      if (error instanceof MissingIPythonError) {
+        await this.handleMissingIPython(notebook.uri.toString());
+      }
       if (error instanceof InteractiveExecutionError) {
         // The chunk did start running (it timed out mid-execution), so the cell is
         // already showing as running by now; this only matters as a safeguard.
@@ -1418,7 +1431,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
 function getChunkOptions(cell: vscode.NotebookCell): InlineChunksCodeCellMetadata["options"] {
   const metadata = getInlineChunksMetadata(cell.metadata);
-  return metadata?.kind === "code" ? metadata.options : undefined;
+  const headerOptions = metadata?.kind === "code" ? metadata.options : undefined;
+  const quartoOptions = parseQuartoCellOptions(cell.document.getText());
+  return { ...(headerOptions ?? {}), ...quartoOptions };
 }
 
 function getNotebookJupyterKernel(notebook: vscode.NotebookDocument): string | undefined {
@@ -1430,6 +1445,13 @@ function getNotebookJupyterKernel(notebook: vscode.NotebookDocument): string | u
 
 function runtimeSelectionKey(uri: vscode.Uri): string {
   return `pythonRuntime:${uri.toString()}`;
+}
+
+function resolveExecutionDirectory(notebook: vscode.NotebookDocument): string | undefined {
+  if (notebook.uri.scheme === "file") {
+    return path.dirname(notebook.uri.fsPath);
+  }
+  return vscode.workspace.getWorkspaceFolder(notebook.uri)?.uri.fsPath;
 }
 
 function hasPythonCells(notebook: vscode.NotebookDocument): boolean {
@@ -1595,7 +1617,7 @@ function toParsedChunk(notebook: vscode.NotebookDocument, cell: vscode.NotebookC
     language: isInline ? "r" : cell.document.languageId,
     header,
     headerInfo: isInline ? "r inline" : codeMetadata?.headerInfo ?? cell.document.languageId,
-    label: codeMetadata?.label,
+    label: codeMetadata?.label ?? parseQuartoCellOptions(body).label,
     body,
     isClosed: true,
     fenceLength: codeMetadata?.fenceLength ?? 3,
@@ -1730,9 +1752,13 @@ async function toNotebookOutput(item: OutputItem): Promise<vscode.NotebookCellOu
     return new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(item.markdown, "text/markdown")]);
   }
 
-  if (item.type === "mime") {
-    const bytes = Buffer.from(item.data, item.encoding === "base64" ? "base64" : "utf8");
-    return new vscode.NotebookCellOutput([new vscode.NotebookCellOutputItem(bytes, item.mimeType)]);
+  if (item.type === "display") {
+    return new vscode.NotebookCellOutput(
+      item.items.map((mimeItem) => {
+        const bytes = Buffer.from(mimeItem.data, mimeItem.encoding === "base64" ? "base64" : "utf8");
+        return new vscode.NotebookCellOutputItem(bytes, mimeItem.mimeType);
+      })
+    );
   }
 
   const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(item.path));

@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as vscode from "vscode";
-import { ErrorOutputItem, HtmlOutputItem, ImageOutputItem, MarkdownOutputItem, MimeOutputItem, OutputItem, TextOutputItem } from "../document/chunkTypes";
+import { DisplayOutputItem, ErrorOutputItem, OutputItem, TextOutputItem } from "../document/chunkTypes";
 import {
   Executor,
   ExecutionCancellationToken,
@@ -11,9 +11,10 @@ import {
   InteractivePromptRequest,
   InteractivePromptResponse
 } from "./executorTypes";
-import { CancelledExecutionError } from "./executionErrors";
+import { CancelledExecutionError, MissingIPythonError } from "./executionErrors";
 
 const READY_PREFIX = "RMD_NOTEBOOKS_PYTHON_READY:";
+const STARTUP_ERROR_PREFIX = "RMD_NOTEBOOKS_PYTHON_STARTUP_ERROR:";
 const COMMAND_PREFIX = "RMD_NOTEBOOKS_PYTHON_COMMAND:";
 const RESULT_PREFIX = "RMD_NOTEBOOKS_PYTHON_RESULT:";
 const PROMPT_PREFIX = "RMD_NOTEBOOKS_PYTHON_PROMPT:";
@@ -24,27 +25,11 @@ interface RawExecutionPayload {
   cancelled?: boolean;
   startedAt: number;
   finishedAt: number;
-  stdout: string;
-  stderr: string;
-  html: string;
-  markdown: string;
-  images: Array<{
-    path: string;
-    mimeType: string;
-  }>;
-  richOutputs?: Array<
-    | { type: "text"; text: string }
-    | { type: "html"; html: string }
-    | { type: "markdown"; markdown: string }
-    | { type: "image"; path: string; mimeType: string }
-    | { type: "mime"; mimeType: string; data: string; encoding?: "utf8" | "base64" }
+  events: Array<
+    | { type: "stream"; name: "stdout" | "stderr"; text: string }
+    | { type: "display"; items: Array<{ mimeType: string; data: string; encoding?: "utf8" | "base64" }>; displayId?: string }
+    | { type: "error"; text: string }
   >;
-}
-
-interface DataFrameRenderOptions {
-  render: boolean;
-  maxRows: number;
-  maxColumns: number;
 }
 
 interface ExecutionRequest {
@@ -52,7 +37,6 @@ interface ExecutionRequest {
   workingDirectory?: string;
   artifactDirectory?: string;
   plot?: ExecutionContext["plot"];
-  dataFrame: DataFrameRenderOptions;
   promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>;
   onStart?: (executionOrder: number) => void;
 }
@@ -71,18 +55,10 @@ export interface PythonInterpreterSelection {
   environmentVariables?: Record<string, string | undefined>;
 }
 
-export type PythonExecutionEngine = "ipython" | "python";
-
 export class PythonExecutor implements Executor {
   public readonly language = "python";
   private readonly sessions = new Map<string, PythonSession>();
   private readonly selections = new Map<string, PythonInterpreterSelection>();
-  private readonly fallbackEmitter = new vscode.EventEmitter<{
-    documentUri: string;
-    selection?: PythonInterpreterSelection;
-  }>();
-  private readonly reportedFallbacks = new Set<string>();
-  public readonly onDidUsePythonFallback = this.fallbackEmitter.event;
 
   public constructor(private readonly extensionUri: vscode.Uri) {}
 
@@ -96,58 +72,34 @@ export class PythonExecutor implements Executor {
   }
 
   public async executeChunk(context: ExecutionContext): Promise<ExecutionResult> {
-    const configuration = vscode.workspace.getConfiguration("rmdNotebooks");
-    const payload = await this.getOrCreateSession(context.documentUri, context.workspaceFolder).execute(
+    const workingDirectory = context.workingDirectory ?? context.workspaceFolder;
+    const payload = await this.getOrCreateSession(context.documentUri, workingDirectory).execute(
       {
         code: context.code,
-        workingDirectory: context.workspaceFolder,
+        workingDirectory,
         artifactDirectory: context.artifactDirectory,
         plot: context.plot,
-        dataFrame: {
-          render: configuration.get<boolean>("output.dataFrameRender", true),
-          maxRows: configuration.get<number>("output.dataFrameMaxRows", 50),
-          maxColumns: configuration.get<number>("output.dataFrameMaxColumns", 50)
-        },
         promptHandler: context.prompt,
         onStart: context.onStart
       },
       context.token
     );
 
-    const items: OutputItem[] = [];
-    if (payload.stdout.trim().length > 0) {
-      items.push({ type: "text", text: payload.stdout.trimEnd() } satisfies TextOutputItem);
-    }
-    if (payload.stderr.trim().length > 0) {
-      items.push({ type: "error", text: payload.stderr.trimEnd() } satisfies ErrorOutputItem);
-    }
-    if (payload.html.trim().length > 0) {
-      items.push({ type: "html", html: payload.html.trim() } satisfies HtmlOutputItem);
-    }
-    if (payload.markdown.trim().length > 0) {
-      items.push({ type: "markdown", markdown: payload.markdown.trimEnd() } satisfies MarkdownOutputItem);
-    }
-    for (const output of payload.richOutputs ?? []) {
-      if (output.type === "text") {
-        items.push({ type: "text", text: output.text } satisfies TextOutputItem);
-      } else if (output.type === "html") {
-        items.push({ type: "html", html: output.html } satisfies HtmlOutputItem);
-      } else if (output.type === "markdown") {
-        items.push({ type: "markdown", markdown: output.markdown } satisfies MarkdownOutputItem);
-      } else if (output.type === "image") {
-        items.push({ type: "image", path: output.path, mimeType: output.mimeType } satisfies ImageOutputItem);
-      } else {
-        items.push({
-          type: "mime",
-          mimeType: output.mimeType,
-          data: output.data,
-          encoding: output.encoding
-        } satisfies MimeOutputItem);
+    const items: OutputItem[] = payload.events.flatMap((event): OutputItem[] => {
+      if (event.type === "stream") {
+        return event.name === "stdout"
+          ? [{ type: "text", text: event.text } satisfies TextOutputItem]
+          : [{ type: "error", text: event.text } satisfies ErrorOutputItem];
       }
-    }
-    for (const image of payload.images) {
-      items.push({ type: "image", path: image.path, mimeType: image.mimeType } satisfies ImageOutputItem);
-    }
+      if (event.type === "error") {
+        return [{ type: "error", text: event.text } satisfies ErrorOutputItem];
+      }
+      return [{
+        type: "display",
+        items: event.items,
+        displayId: event.displayId
+      } satisfies DisplayOutputItem];
+    });
 
     return {
       success: payload.success,
@@ -172,7 +124,6 @@ export class PythonExecutor implements Executor {
 
   public async disposeAll(): Promise<void> {
     await Promise.all([...this.sessions.keys()].map((uri) => this.disposeSession(uri)));
-    this.fallbackEmitter.dispose();
   }
 
   public async selectInterpreter(documentUri: string, selection?: PythonInterpreterSelection): Promise<void> {
@@ -218,24 +169,12 @@ export class PythonExecutor implements Executor {
       selection?.environmentVariables
     );
     this.sessions.set(documentUri, created);
-    void created.ready().then(
-      (engine) => {
-        if (engine !== "python") {
-          return;
-        }
-        const reportKey = `${documentUri}::${selection?.id ?? pythonPath}`;
-        if (!this.reportedFallbacks.has(reportKey)) {
-          this.reportedFallbacks.add(reportKey);
-          this.fallbackEmitter.fire({ documentUri, selection });
-        }
-      },
-      () => {
+    void created.ready().then(undefined, () => {
         if (this.sessions.get(documentUri) === created) {
           this.sessions.delete(documentUri);
         }
         void created.dispose(false);
-      }
-    );
+      });
     return created;
   }
 }
@@ -243,8 +182,8 @@ export class PythonExecutor implements Executor {
 class PythonSession {
   private readonly process: ChildProcessWithoutNullStreams;
   private readonly lineReader: readline.Interface;
-  private readonly readyPromise: Promise<PythonExecutionEngine>;
-  private readyResolve!: (engine: PythonExecutionEngine) => void;
+  private readonly readyPromise: Promise<void>;
+  private readyResolve!: () => void;
   private readyReject!: (error: Error) => void;
   private readonly startTimer: NodeJS.Timeout;
   private readonly queue: QueuedExecution[] = [];
@@ -274,7 +213,7 @@ class PythonSession {
       }
     });
     this.lineReader = readline.createInterface({ input: this.process.stdout });
-    this.readyPromise = new Promise<PythonExecutionEngine>((resolve, reject) => {
+    this.readyPromise = new Promise<void>((resolve, reject) => {
       this.readyResolve = resolve;
       this.readyReject = reject;
     });
@@ -299,7 +238,7 @@ class PythonSession {
     });
   }
 
-  public async ready(): Promise<PythonExecutionEngine> {
+  public async ready(): Promise<void> {
     return this.readyPromise;
   }
 
@@ -386,8 +325,13 @@ class PythonSession {
     if (line.startsWith(READY_PREFIX)) {
       this.sessionReady = true;
       clearTimeout(this.startTimer);
-      const payload = decodeMessage<{ engine?: string }>(line.slice(READY_PREFIX.length));
-      this.readyResolve(payload.engine === "ipython" ? "ipython" : "python");
+      this.readyResolve();
+      return;
+    }
+    if (line.startsWith(STARTUP_ERROR_PREFIX)) {
+      clearTimeout(this.startTimer);
+      const payload = decodeMessage<{ message?: string }>(line.slice(STARTUP_ERROR_PREFIX.length));
+      this.readyReject(new MissingIPythonError(payload.message));
       return;
     }
     if (line.startsWith(PROMPT_PREFIX)) {
@@ -403,10 +347,10 @@ class PythonSession {
         }
         const payload = decodeMessage<RawExecutionPayload>(line.slice(RESULT_PREFIX.length));
         if (this.runtimeStdout.trim().length > 0) {
-          payload.stdout = joinOutput(payload.stdout, this.runtimeStdout);
+          payload.events.push({ type: "stream", name: "stdout", text: this.runtimeStdout });
         }
         if (this.runtimeStderr.trim().length > 0) {
-          payload.stderr = joinOutput(payload.stderr, this.runtimeStderr);
+          payload.events.push({ type: "stream", name: "stderr", text: this.runtimeStderr });
         }
         if (payload.cancelled) {
           task.reject(new CancelledExecutionError("Python execution was interrupted."));
@@ -475,8 +419,4 @@ function encodeMessage(value: unknown): string {
 
 function decodeMessage<T>(value: string): T {
   return JSON.parse(Buffer.from(value, "base64").toString("utf8")) as T;
-}
-
-function joinOutput(first: string, second: string): string {
-  return [first.trimEnd(), second.trimEnd()].filter((value) => value.length > 0).join("\n");
 }

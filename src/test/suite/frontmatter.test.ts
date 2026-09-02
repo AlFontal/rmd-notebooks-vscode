@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "mocha";
-import { parseFrontmatter, parseJupyterFrontmatter, updateJupyterFrontmatter } from "../../notebook/frontmatter";
+import { parseFrontmatter, parseJupyterFrontmatter } from "../../notebook/frontmatter";
 
 describe("frontmatter", () => {
   it("parses frontmatter only at the start of a document", () => {
@@ -34,9 +34,4 @@ describe("frontmatter", () => {
     );
   });
 
-  it("updates or removes Jupyter metadata without changing other YAML", () => {
-    const body = "title: Test\njupyter:\n  kernelspec:\n    name: old\n    language: python\nauthor: Ada";
-    assert.equal(updateJupyterFrontmatter(body, "new-kernel"), "title: Test\njupyter: new-kernel\nauthor: Ada");
-    assert.equal(updateJupyterFrontmatter(body), "title: Test\nauthor: Ada");
-  });
 });

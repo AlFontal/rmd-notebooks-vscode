@@ -39,6 +39,7 @@ export interface ExecutionCancellationToken {
 export interface ExecutionContext {
   documentUri: string;
   workspaceFolder?: string;
+  workingDirectory?: string;
   chunkId: string;
   language: string;
   code: string;

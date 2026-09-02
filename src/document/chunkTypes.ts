@@ -79,11 +79,16 @@ export interface MarkdownOutputItem {
   markdown: string;
 }
 
-export interface MimeOutputItem {
-  type: "mime";
+export interface DisplayMimeItem {
   mimeType: string;
   data: string;
   encoding?: "utf8" | "base64";
+}
+
+export interface DisplayOutputItem {
+  type: "display";
+  items: DisplayMimeItem[];
+  displayId?: string;
 }
 
 export type OutputItem =
@@ -92,7 +97,7 @@ export type OutputItem =
   | ImageOutputItem
   | HtmlOutputItem
   | MarkdownOutputItem
-  | MimeOutputItem;
+  | DisplayOutputItem;
 
 export type ChunkOutputStatus = "running" | "success" | "error" | "redirected" | "cancelled";
 

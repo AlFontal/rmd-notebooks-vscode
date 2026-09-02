@@ -200,7 +200,7 @@
         "rmdNotebooks.python.path": {
           "type": "string",
           "default": "",
-          "description": "Fallback Python executable for the base Rmd Notebooks controller. A Python environment selected in the notebook kernel picker takes precedence. When empty, falls back to python3 on macOS/Linux or python on Windows."
+          "description": "Configured Python interpreter fallback. Persisted and file/workspace-active environments take precedence; when empty, selection continues through QUARTO_PYTHON and the platform PATH fallback."
         },
         "rmdNotebooks.python.args": {
           "type": "array",

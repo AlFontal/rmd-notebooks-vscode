@@ -11,3 +11,10 @@ export class CancelledExecutionError extends Error {
     this.name = "CancelledExecutionError";
   }
 }
+
+export class MissingIPythonError extends Error {
+  public constructor(message = "Python chunks require IPython in the selected environment.") {
+    super(message);
+    this.name = "MissingIPythonError";
+  }
+}

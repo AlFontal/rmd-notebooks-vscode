@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- execute `{python}` chunks in persistent per-document Python sessions, with global environment and kernelspec discovery, immediate fuzzy selection from the toolbar/status bar, Quarto preview alignment, IPython rich output, plots, prompts, cancellation, and session restart support (#27)
+- execute `{python}` chunks in persistent per-document IPython sessions, with lazy global environment discovery, immediate fuzzy selection from the status bar or Command Palette, source-directory imports, ordered rich MIME output, Quarto `#|` options, scoped preview alignment, plots, prompts, cancellation, and session restart support (#27)
 
 ## 0.5.0
 

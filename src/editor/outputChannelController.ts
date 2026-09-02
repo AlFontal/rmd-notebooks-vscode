@@ -121,9 +121,8 @@ function formatOutputs(record: ChunkOutputRecord): string[] {
       continue;
     }
 
-    if (output.type === "mime") {
-      lines.push(`[${output.mimeType}]`);
-      lines.push(output.data);
+    if (output.type === "display") {
+      lines.push(`[display: ${output.items.map((item) => item.mimeType).join(", ")}]`);
     }
   }
 

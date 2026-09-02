@@ -58,24 +58,6 @@ export function parseJupyterFrontmatter(body: string): JupyterFrontmatterInfo | 
   return undefined;
 }
 
-export function updateJupyterFrontmatter(body: string, kernelName?: string): string {
-  const lines = body.replace(/\r\n/g, "\n").split("\n");
-  const existing = parseJupyterFrontmatter(body);
-  if (!existing) {
-    if (!kernelName) {
-      return body;
-    }
-    return [...lines, `jupyter: ${quoteYamlScalar(kernelName)}`].join("\n");
-  }
-
-  lines.splice(
-    existing.startLine,
-    existing.endLine - existing.startLine + 1,
-    ...(kernelName ? [`jupyter: ${quoteYamlScalar(kernelName)}`] : [])
-  );
-  return lines.join("\n").replace(/^\n+|\n+$/g, "");
-}
-
 function findYamlBlockEnd(lines: readonly string[], startLine: number): number {
   let endLine = startLine;
   for (let index = startLine + 1; index < lines.length; index += 1) {
@@ -97,8 +79,4 @@ function unquote(value: string): string | undefined {
     return trimmed.slice(1, -1);
   }
   return trimmed;
-}
-
-function quoteYamlScalar(value: string): string {
-  return /^[A-Za-z0-9_.-]+$/.test(value) ? value : JSON.stringify(value);
 }
