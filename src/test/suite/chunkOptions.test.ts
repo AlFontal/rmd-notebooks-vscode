@@ -74,6 +74,7 @@ describe("chunkOptions", () => {
         finishedAt: 2,
         items: [
           { type: "text", text: "hello" },
+          { type: "stream", name: "stderr", text: "diagnostic" },
           { type: "html", html: "<strong>hello</strong>" },
           { type: "image", path: "/tmp/plot.png", mimeType: "image/png" }
         ]
@@ -82,6 +83,23 @@ describe("chunkOptions", () => {
     );
 
     assert.deepEqual(result.items, []);
+  });
+
+  it("suppresses successful stderr streams but preserves real execution errors", () => {
+    const result = applyChunkOptionsToResult(
+      {
+        success: true,
+        startedAt: 1,
+        finishedAt: 2,
+        items: [
+          { type: "stream", name: "stderr", text: "diagnostic" },
+          { type: "error", text: "formatter failed" }
+        ]
+      },
+      { output: false }
+    );
+
+    assert.deepEqual(result.items, [{ type: "error", text: "formatter failed" }]);
   });
 
   it("suppresses text and html for results='hide' but keeps plots", () => {

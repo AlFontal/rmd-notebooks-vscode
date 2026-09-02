@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as vscode from "vscode";
-import { DisplayOutputItem, ErrorOutputItem, OutputItem, TextOutputItem } from "../document/chunkTypes";
+import { DisplayOutputItem, ErrorOutputItem, OutputItem, StreamOutputItem, TextOutputItem } from "../document/chunkTypes";
 import {
   Executor,
   ExecutionCancellationToken,
@@ -35,7 +35,6 @@ interface RawExecutionPayload {
 interface ExecutionRequest {
   code: string;
   workingDirectory?: string;
-  artifactDirectory?: string;
   plot?: ExecutionContext["plot"];
   promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>;
   onStart?: (executionOrder: number) => void;
@@ -77,7 +76,6 @@ export class PythonExecutor implements Executor {
       {
         code: context.code,
         workingDirectory,
-        artifactDirectory: context.artifactDirectory,
         plot: context.plot,
         promptHandler: context.prompt,
         onStart: context.onStart
@@ -89,7 +87,7 @@ export class PythonExecutor implements Executor {
       if (event.type === "stream") {
         return event.name === "stdout"
           ? [{ type: "text", text: event.text } satisfies TextOutputItem]
-          : [{ type: "error", text: event.text } satisfies ErrorOutputItem];
+          : [{ type: "stream", name: "stderr", text: event.text } satisfies StreamOutputItem];
       }
       if (event.type === "error") {
         return [{ type: "error", text: event.text } satisfies ErrorOutputItem];
@@ -190,7 +188,6 @@ class PythonSession {
   private pending: QueuedExecution | undefined;
   private starting = false;
   private alive = true;
-  private sessionReady = false;
   private executionCount = 0;
   private runtimeStdout = "";
   private runtimeStderr = "";
@@ -323,7 +320,6 @@ class PythonSession {
 
   private handleStdoutLine(line: string): void {
     if (line.startsWith(READY_PREFIX)) {
-      this.sessionReady = true;
       clearTimeout(this.startTimer);
       this.readyResolve();
       return;

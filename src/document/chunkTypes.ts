@@ -61,6 +61,12 @@ export interface ErrorOutputItem {
   text: string;
 }
 
+export interface StreamOutputItem {
+  type: "stream";
+  name: "stderr";
+  text: string;
+}
+
 export interface ImageOutputItem {
   type: "image";
   path: string;
@@ -93,6 +99,7 @@ export interface DisplayOutputItem {
 
 export type OutputItem =
   | TextOutputItem
+  | StreamOutputItem
   | ErrorOutputItem
   | ImageOutputItem
   | HtmlOutputItem

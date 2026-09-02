@@ -126,7 +126,7 @@ export function applyChunkOptionsToResult(result: ExecutionResult, options: Chun
     if (
       result.success &&
       options.results === "hide" &&
-      (item.type === "text" || item.type === "html" || item.type === "markdown" || item.type === "display")
+      (item.type === "text" || item.type === "stream" || item.type === "html" || item.type === "markdown" || item.type === "display")
     ) {
       return false;
     }

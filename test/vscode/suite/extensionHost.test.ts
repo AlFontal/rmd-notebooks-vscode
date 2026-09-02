@@ -34,6 +34,7 @@ interface InlineChunksExtensionApi {
     }>;
   }>;
   getPythonEnvironmentState(documentUri: string): {
+    initialized: boolean;
     environments: Array<{ id: string; path: string; label: string }>;
     selectedPath?: string;
   };
@@ -337,6 +338,27 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.match(state.outputChannelText, /integration\.rmd[\s\S]*\[stdout\][\s\S]*\[1\] 2/i);
   });
 
+  it("skips eval-false Python chunks without starting environment discovery", async () => {
+    await writeFixture(
+      "python-skip-without-discovery.qmd",
+      "```{python}\n#| eval: false\nraise RuntimeError('must not run')\n```\n"
+    );
+    const uri = getWorkspaceFileUri("python-skip-without-discovery.qmd");
+    const notebook = await vscode.workspace.openNotebookDocument(uri);
+    await vscode.window.showNotebookDocument(notebook);
+
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(uri, (candidate) =>
+      candidate.outputs.length === 1 && candidate.outputs[0].status === "success"
+    );
+    const environmentState = extensionApi.getPythonEnvironmentState(uri.toString());
+
+    assert.equal(environmentState.initialized, false);
+    assert.equal(environmentState.selectedPath, undefined);
+    assert.deepEqual(state.outputs[0].outputTypes, []);
+    assert.ok(!state.outputChannelText.includes("must not run"));
+  });
+
   it("runs Python chunks in a persistent qmd session and renders rich output", async () => {
     await writeFixture(
       "python-integration.qmd",
@@ -393,12 +415,7 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.equal(await waitForExecutionOrder(editor.notebook.uri, pythonCells[2].index), 3);
 
     const environmentState = extensionApi.getPythonEnvironmentState(editor.notebook.uri.toString());
-    assert.ok(environmentState.environments.length > 0, "Expected Python extension environment discovery.");
-    assert.ok(environmentState.selectedPath, "Expected the preferred Python environment to be selected.");
-    assert.ok(
-      environmentState.environments.some((environment) => environment.path === environmentState.selectedPath),
-      `Selected interpreter was not one of the discovered environments: ${environmentState.selectedPath}`
-    );
+    assert.equal(environmentState.selectedPath, requireTestPython());
 
     await waitForNotebookOutput(pythonCells[3], (cell) =>
       cell.outputs.some((output) => output.items.some((item) => item.mime === "image/png"))
@@ -436,6 +453,51 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.equal(cell.outputs[2].items[0]?.mime, "application/vnd.code.notebook.stdout");
     assert.ok(Buffer.from(cell.outputs[0].items[0].data).toString("utf8").includes("before display"));
     assert.ok(Buffer.from(cell.outputs[2].items[0].data).toString("utf8").includes("after display"));
+  });
+
+  it("keeps successful stderr suppressible while preserving real Python errors", async () => {
+    await writeFixture(
+      "python-stderr.qmd",
+      [
+        "```{python visible-stderr}",
+        "import sys",
+        "print('visible diagnostic', file=sys.stderr)",
+        "```",
+        "",
+        "```{python hidden-stderr}",
+        "#| output: false",
+        "print('hidden diagnostic', file=sys.stderr)",
+        "```",
+        "",
+        "```{python real-error}",
+        "#| output: false",
+        "raise RuntimeError('real failure')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-stderr.qmd");
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.length === 3 && candidate.outputs.every((record) => record.status !== "running")
+    );
+    const cells = editor.notebook.getCells().filter((cell) => cell.document.languageId === "python");
+    const visibleCell = await waitForNotebookOutput(cells[0], (cell) =>
+      cell.outputs.some((output) => output.items.some(
+        (item) => item.mime === "application/vnd.code.notebook.stderr"
+      ))
+    );
+
+    assert.deepEqual(state.outputs[0].outputTypes, ["stream"]);
+    assert.deepEqual(state.outputs[1].outputTypes, []);
+    assert.equal(state.outputs[1].status, "success");
+    assert.deepEqual(state.outputs[2].outputTypes, ["error"]);
+    assert.equal(state.outputs[2].status, "error");
+    assert.ok(notebookOutputText(visibleCell, "application/vnd.code.notebook.stderr").includes("visible diagnostic"));
+    assert.ok(state.outputChannelText.includes("visible diagnostic"));
+    assert.ok(!state.outputChannelText.includes("hidden diagnostic"));
+    assert.ok(state.outputChannelText.includes("real failure"));
   });
 
   it("honors leading Quarto cell options when running all Python chunks", async () => {
@@ -536,11 +598,15 @@ describe("Rmd Notebooks Notebook Host", () => {
     const notebook = await vscode.workspace.openNotebookDocument(uri);
     await vscode.window.showNotebookDocument(notebook);
 
+    const selector = vscode.commands.executeCommand("rmdNotebooks.selectPythonEnvironment", notebook.uri.toString());
+
     const environmentState = await waitFor(() => {
       const state = extensionApi.getPythonEnvironmentState(notebook.uri.toString());
-      return state.environments.length > 1 && state.selectedPath ? state : undefined;
+      return state.initialized && state.environments.length > 1 ? state : undefined;
     });
     assert.ok(environmentState.environments.some((environment) => environment.path !== "python3"));
+    await vscode.commands.executeCommand("workbench.action.closeQuickOpen");
+    await selector;
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
     await vscode.workspace.fs.delete(uri);
   });

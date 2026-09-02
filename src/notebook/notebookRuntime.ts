@@ -112,9 +112,6 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       vscode.window.onDidChangeActiveNotebookEditor((editor) => {
         this.updatePythonEnvironmentStatus(editor);
         if (editor && isInlineChunksNotebook(editor.notebook)) {
-          if (hasPythonCells(editor.notebook)) {
-            void this.ensurePythonRuntimeSelected(editor.notebook);
-          }
           void this.restoreOutputsToNotebook(editor.notebook)
             .then(() => this.collapseInlineInputs(editor.notebook))
             .catch((error) => console.error("Unable to restore Rmd notebook outputs", error));
@@ -485,11 +482,13 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   }
 
   public getPythonEnvironmentState(documentUri: string): {
+    initialized: boolean;
     environments: Array<{ id: string; path: string; label: string }>;
     selectedPath?: string;
   } {
     const notebook = vscode.workspace.notebookDocuments.find((candidate) => candidate.uri.toString() === documentUri);
     return {
+      initialized: this.pythonDiscovery.getState().initialized,
       environments: this.pythonDiscovery.getRuntimes(notebook?.uri).map((runtime) => ({
           id: runtime.id,
           path: runtime.renderPythonPath,
@@ -770,10 +769,6 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     cell = notebook.cellAt(entry.index);
 
     const outputs = await this.ensureOutputsLoaded(notebook.uri.toString());
-    const executor = this.executorRegistry.get(entry.chunk.language);
-    if (["python", "py"].includes(entry.chunk.language.toLowerCase())) {
-      await this.ensurePythonRuntimeSelected(notebook);
-    }
     const chunkOptions = getChunkOptions(cell);
     const isInline = entry.sourceKind === "inline";
     const selectedController = await this.ensureControllerSelected(notebook);
@@ -815,6 +810,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       execution.end(true, Date.now());
       void vscode.window.setStatusBarMessage(`Rmd Notebooks: skipped ${entry.chunk.label ?? "cell"} because eval=FALSE`, 2500);
       return "completed";
+    }
+
+    const executor = this.executorRegistry.get(entry.chunk.language);
+    if (["python", "py"].includes(entry.chunk.language.toLowerCase())) {
+      await this.ensurePythonRuntimeSelected(notebook);
     }
 
     if (!executor) {
@@ -1454,14 +1454,6 @@ function resolveExecutionDirectory(notebook: vscode.NotebookDocument): string | 
   return vscode.workspace.getWorkspaceFolder(notebook.uri)?.uri.fsPath;
 }
 
-function hasPythonCells(notebook: vscode.NotebookDocument): boolean {
-  return notebook.getCells().some(
-    (cell) =>
-      cell.kind === vscode.NotebookCellKind.Code &&
-      ["python", "py"].includes(cell.document.languageId.toLowerCase())
-  );
-}
-
 function isPythonLaunchDescriptor(value: unknown): value is PythonLaunchDescriptor {
   if (!value || typeof value !== "object") {
     return false;
@@ -1741,6 +1733,10 @@ async function toNotebookOutput(item: OutputItem): Promise<vscode.NotebookCellOu
   }
 
   if (item.type === "error") {
+    return new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.stderr(ensureTrailingNewline(item.text))]);
+  }
+
+  if (item.type === "stream") {
     return new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.stderr(ensureTrailingNewline(item.text))]);
   }
 

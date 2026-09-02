@@ -44,6 +44,7 @@ export interface InlineChunksExtensionApi {
     }>;
   }>;
   getPythonEnvironmentState(documentUri: string): {
+    initialized: boolean;
     environments: Array<{ id: string; path: string; label: string }>;
     selectedPath?: string;
   };

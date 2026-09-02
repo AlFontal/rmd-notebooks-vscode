@@ -55,7 +55,7 @@ The VS Code Marketplace package installs the [vscode-R extension](https://market
 - Handles common prompt-style interactions such as R `menu()`/`readline()` and Python `input()` with VS Code UI
 - Lets unsupported interactive chunks fall back to an R terminal when the optional timeout is enabled
 
-Python chunks use the selected interpreter directly and run from the source file's directory, so sibling imports and relative paths behave like Quarto. IPython is required; if it is missing, Rmd Notebooks offers to install it in the selected environment. Pandas, Matplotlib, Plotnine, and other libraries then render through their normal IPython formatters, preserving complete MIME bundles and output order.
+Python chunks use the selected interpreter directly and run from the source file's directory, so sibling imports and relative paths behave like Quarto. IPython is required; if it is missing, Rmd Notebooks offers to install it in the selected environment. Pandas, Matplotlib, Plotnine, and other libraries then render through their normal IPython formatters. Complete MIME bundles are preserved, and stream plus IPython rich-display events retain their execution order.
 
 ## Python Environment Selection
 
@@ -97,6 +97,7 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 ## Current Limits
 
 - Rich Python outputs preserve every MIME alternative emitted by IPython; Matplotlib and Plotnine plots render inline
+- Matplotlib figures that require the static PNG fallback are appended after the cell finishes, so their position relative to later stream output is not guaranteed
 - Jupyter widgets and other comm-channel-based outputs are not supported; they require a full Jupyter kernel and frontend comm lifecycle
 - htmlwidgets and full HTML dependency lifecycles are not supported yet
 - Common knitr header options and leading Quarto `#|` options are enforced, including `eval`, `include`, `output`, figure size/aspect/DPI, and output hiding

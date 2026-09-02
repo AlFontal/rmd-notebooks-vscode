@@ -99,7 +99,13 @@ function formatOutputs(record: ChunkOutputRecord): string[] {
     }
 
     if (output.type === "error") {
-      lines.push("[stderr]");
+      lines.push("[error]");
+      lines.push(output.text);
+      continue;
+    }
+
+    if (output.type === "stream") {
+      lines.push(`[${output.name}]`);
       lines.push(output.text);
       continue;
     }

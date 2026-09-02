@@ -13,7 +13,6 @@ import contextlib
 import io
 import json
 import os
-from pathlib import Path
 import sys
 import time
 import traceback
@@ -225,7 +224,6 @@ def _capture_matplotlib_plots(plot: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _execute(
     request: dict[str, Any],
-    namespace: dict[str, Any],
     ipython_runtime: tuple[Any, dict[str, Any]],
 ) -> dict[str, Any]:
     started_at = int(time.time() * 1000)
@@ -234,13 +232,10 @@ def _execute(
     events: list[dict[str, Any]] = []
 
     working_directory = request.get("workingDirectory")
-    artifact_directory = str(request.get("artifactDirectory") or "")
     if working_directory:
         os.chdir(working_directory)
         sys.path[:] = [entry for entry in sys.path if entry != working_directory]
         sys.path.insert(0, working_directory)
-    if artifact_directory:
-        Path(artifact_directory).mkdir(parents=True, exist_ok=True)
 
     original_input = builtins.input
     builtins.input = _input
@@ -311,7 +306,7 @@ def main() -> None:
             continue
         try:
             request = _decode_message(line[len(COMMAND_PREFIX) :])
-            result = _execute(request, namespace, ipython_runtime)
+            result = _execute(request, ipython_runtime)
         except BaseException:
             now = int(time.time() * 1000)
             result = {
