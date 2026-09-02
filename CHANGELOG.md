@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - execute `{python}` chunks in persistent per-document IPython sessions, with lazy global environment discovery, immediate fuzzy selection from the status bar or Command Palette, source-directory imports, ordered stream/IPython display output, Quarto `#|` options, scoped preview alignment, plots, prompts, cancellation, and session restart support (#27)
 
