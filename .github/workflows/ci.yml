@@ -46,13 +46,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install R
+      - name: Install R and knitr
         run: |
           sudo apt-get update
-          sudo apt-get install -y r-base-core
-      - name: Install Knitr
-        run: |
-          Rscript -e 'install.packages("knitr", repos = "https://cloud.r-project.org")'
+          sudo apt-get install -y r-base-core r-cran-knitr
       - run: python -m pip install ipython
       - run: npm ci
       - run: xvfb-run -a npm run test:vscode
