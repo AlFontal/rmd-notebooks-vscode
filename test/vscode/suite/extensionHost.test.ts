@@ -2,7 +2,6 @@ import { strict as assert } from "node:assert";
 import { afterEach, before, beforeEach, describe, it } from "mocha";
 import * as vscode from "vscode";
 import { PreviewServices, previewNotebookHtml, withQuartoPython } from "../../../src/commands/previewHtml";
-import { controllerIdForRuntime } from "../../../src/execution/pythonRuntimeTypes";
 
 interface InlineChunksExtensionApi {
   getDocumentState(documentUri: string): Promise<{
@@ -38,6 +37,7 @@ interface InlineChunksExtensionApi {
     environments: Array<{ id: string; path: string; label: string }>;
     selectedPath?: string;
   };
+  selectTestPythonInterpreter(documentUri: string, executable: string): Promise<void>;
 }
 
 let extensionApi: InlineChunksExtensionApi;
@@ -451,17 +451,13 @@ describe("Rmd Notebooks Notebook Host", () => {
       state.outputs.some((record) => record.status === "success")
     );
 
-    await updateTestSetting("python.path", "python3");
-    await vscode.commands.executeCommand("rmdNotebooks.refreshPythonEnvironments");
-    await vscode.commands.executeCommand("_notebook.selectKernel", {
-      id: controllerIdForRuntime("configured:python3"),
-      extension: "AlFontal.rmd-notebooks-vscode"
-    });
+    await extensionApi.selectTestPythonInterpreter(editor.notebook.uri.toString(), "python3");
     await waitFor(() =>
       extensionApi.getPythonEnvironmentState(editor.notebook.uri.toString()).selectedPath === "python3"
         ? true
         : undefined
     );
+    assert.equal(vscode.workspace.getConfiguration("rmdNotebooks").inspect("python.path")?.workspaceValue, undefined);
 
     editor.selection = singleCellRange(findLastCodeCellIndex(editor.notebook));
     await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");

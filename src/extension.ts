@@ -47,6 +47,7 @@ export interface InlineChunksExtensionApi {
     environments: Array<{ id: string; path: string; label: string }>;
     selectedPath?: string;
   };
+  selectTestPythonInterpreter(documentUri: string, executable: string): Promise<void>;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<InlineChunksExtensionApi> {
@@ -84,7 +85,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
     new vscode.Disposable(() => void Promise.all(executorRegistry.all().map((executor) => executor.disposeAll?.())))
   );
 
-  await pythonEnvironmentDiscovery.initialize();
   await notebookRuntime.initialize();
   const recommendationTimer = setTimeout(() => void maybeRecommendRExtension(context), 2000);
   context.subscriptions.push(new vscode.Disposable(() => clearTimeout(recommendationTimer)));
@@ -100,7 +100,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Inline
       ),
     clearTestPromptResponses: () => notebookRuntime.clearTestPromptResponses(),
     takeTestPromptRequests: () => notebookRuntime.takeTestPromptRequests(),
-    getPythonEnvironmentState: (documentUri) => notebookRuntime.getPythonEnvironmentState(documentUri)
+    getPythonEnvironmentState: (documentUri) => notebookRuntime.getPythonEnvironmentState(documentUri),
+    selectTestPythonInterpreter: (documentUri, executable) =>
+      notebookRuntime.selectTestPythonInterpreter(documentUri, executable)
   };
 }
 

@@ -15,10 +15,8 @@ import { CancelledExecutionError, InteractiveExecutionError } from "../execution
 import { RTerminalRunner } from "../execution/rTerminalRunner";
 import { PythonExecutor } from "../execution/pythonExecutor";
 import {
-  controllerIdForRuntime,
   filterPythonRuntimes,
-  PythonLaunchDescriptor,
-  resolvePythonRuntimePreference
+  PythonLaunchDescriptor
 } from "../execution/pythonRuntimeTypes";
 import { PythonEnvironmentDiscovery } from "../integration/pythonEnvironmentDiscovery";
 import { OutputStore } from "../persistence/outputStore";
@@ -31,7 +29,7 @@ import {
 } from "./notebookTypes";
 import { applyChunkOptionsToResult, parseChunkOptions } from "./chunkOptions";
 import { buildChunkHeader, extractChunkLabel, normalizeChunkHeaderInfo, validateChunkHeaderInfo } from "./chunkHeader";
-import { parseJupyterFrontmatter, updateJupyterFrontmatter } from "./frontmatter";
+import { parseJupyterFrontmatter } from "./frontmatter";
 import { buildInlineRExecutionCode, parseInlineRExpressions } from "./inlineR";
 
 interface NotebookChunkCell {
@@ -50,12 +48,6 @@ interface NotebookSnapshot {
 
 type ExecuteCellOutcome = "completed" | "redirected";
 
-interface ControllerRegistration {
-  controller: vscode.NotebookController;
-  runtime?: PythonLaunchDescriptor;
-  selectionListener: vscode.Disposable;
-}
-
 export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private readonly snapshots = new Map<string, NotebookSnapshot>();
   private readonly outputsByDocument = new Map<string, Map<string, ChunkOutputRecord>>();
@@ -72,13 +64,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private readonly runsToAbort = new Set<string>();
   private testPromptResponses: InteractivePromptResponse[] = [];
   private readonly testPromptRequests: InteractivePromptRequest[] = [];
-  private readonly controllers = new Map<string, ControllerRegistration>();
-  private readonly runtimeControllerIds = new Map<string, string>();
-  private readonly selectedControllers = new Map<string, vscode.NotebookController>();
-  private readonly preferredControllers = new Map<string, vscode.NotebookController>();
-  private readonly promptedYamlMismatches = new Set<string>();
-  private readonly controllerSelectionTransitions = new Map<string, Promise<void>>();
-  private readonly defaultController: vscode.NotebookController;
+  private readonly controller: vscode.NotebookController;
   private readonly pythonEnvironmentStatus: vscode.StatusBarItem;
 
   public constructor(
@@ -90,10 +76,24 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     private readonly pythonDiscovery: PythonEnvironmentDiscovery,
     private readonly workspaceState: vscode.Memento
   ) {
-    this.defaultController = this.createController(
+    this.controller = vscode.notebooks.createNotebookController(
       "rmd-notebooks-vscode-controller",
+      INLINE_CHUNKS_NOTEBOOK_TYPE,
       "Rmd Notebooks"
     );
+    this.controller.supportedLanguages = ["r", "python", "markdown"];
+    this.controller.supportsExecutionOrder = true;
+    this.controller.executeHandler = async (cells, notebook) => {
+      const documentUri = notebook.uri.toString();
+      this.runsToAbort.delete(documentUri);
+      for (const cell of cells) {
+        if (this.runsToAbort.has(documentUri)) {
+          break;
+        }
+        await this.executeCell(notebook, cell, cell.index);
+      }
+      this.runsToAbort.delete(documentUri);
+    };
     this.pythonEnvironmentStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     this.pythonEnvironmentStatus.name = "Rmd Notebooks Python Environment";
     this.pythonEnvironmentStatus.command = "rmdNotebooks.selectPythonEnvironment";
@@ -105,13 +105,16 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
   public async initialize(): Promise<void> {
     this.disposables.push(
+      this.controller,
       vscode.workspace.onDidOpenNotebookDocument((notebook) => void this.beginNotebookInitialization(notebook)),
       vscode.workspace.onDidChangeNotebookDocument((event) => void this.handleNotebookChanged(event)),
       vscode.workspace.onDidCloseNotebookDocument((notebook) => void this.handleNotebookClosed(notebook)),
       vscode.window.onDidChangeActiveNotebookEditor((editor) => {
         this.updatePythonEnvironmentStatus(editor);
         if (editor && isInlineChunksNotebook(editor.notebook)) {
-          void this.selectPreferredControllerIfNeeded(editor.notebook);
+          if (hasPythonCells(editor.notebook)) {
+            void this.ensurePythonRuntimeSelected(editor.notebook);
+          }
           void this.restoreOutputsToNotebook(editor.notebook)
             .then(() => this.collapseInlineInputs(editor.notebook))
             .catch((error) => console.error("Unable to restore Rmd notebook outputs", error));
@@ -120,16 +123,12 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     );
     this.disposables.push(
       this.pythonDiscovery.onDidChangeRuntimes(() => {
-        this.refreshPythonRuntimeControllers();
         this.logPythonDiscoveryState();
-        void this.refreshPythonRuntimePreferences();
         this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
       }),
       this.pythonExecutor.onDidUsePythonFallback((event) => void this.handleMissingIPython(event))
     );
     this.disposables.push(this.pythonEnvironmentStatus);
-    this.refreshPythonRuntimeControllers();
-    this.logPythonDiscoveryState();
     this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
 
     for (const notebook of vscode.workspace.notebookDocuments) {
@@ -137,94 +136,12 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
   }
 
-  private syncPythonRuntimes(runtimes: readonly PythonLaunchDescriptor[]): void {
-    const liveRuntimeIds = new Set(runtimes.map((runtime) => runtime.id));
-
-    for (const runtime of runtimes) {
-      const existingControllerId = this.runtimeControllerIds.get(runtime.id);
-      const existing = existingControllerId ? this.controllers.get(existingControllerId) : undefined;
-      if (existing) {
-        existing.runtime = runtime;
-        existing.controller.label = runtime.label;
-        existing.controller.description = `Rmd Notebooks · ${runtime.description ?? "Python"}`;
-        existing.controller.detail = runtime.detail;
-        continue;
-      }
-
-      const controllerId = controllerIdForRuntime(runtime.id);
-      const controller = this.createController(controllerId, runtime.label, runtime);
-      controller.description = `Rmd Notebooks · ${runtime.description ?? "Python"}`;
-      controller.detail = runtime.detail;
-      this.runtimeControllerIds.set(runtime.id, controllerId);
-    }
-
-    for (const [runtimeId, controllerId] of [...this.runtimeControllerIds]) {
-      if (liveRuntimeIds.has(runtimeId)) {
-        continue;
-      }
-      this.runtimeControllerIds.delete(runtimeId);
-      this.disposeController(controllerId);
-    }
-  }
-
-  private refreshPythonRuntimeControllers(resource?: vscode.Uri): void {
-    const runtimes = new Map<string, PythonLaunchDescriptor>();
-    for (const runtime of this.pythonDiscovery.getRuntimes(resource)) {
-      runtimes.set(runtime.id, runtime);
-    }
-    for (const notebook of vscode.workspace.notebookDocuments) {
-      for (const runtime of this.pythonDiscovery.getRuntimes(notebook.uri)) {
-        runtimes.set(runtime.id, runtime);
-      }
-    }
-    this.syncPythonRuntimes([...runtimes.values()]);
-  }
-
   private logPythonDiscoveryState(): void {
     const state = this.pythonDiscovery.getState();
     const detail = state.error
       ? `Discovery error: ${state.error}`
-      : `Found ${state.environments} Python environment(s) and ${state.kernelspecs} Jupyter kernelspec(s).`;
+      : `Found ${state.environments} Python environment(s).`;
     this.outputChannelController.logDiagnostic(detail);
-  }
-
-  private setPreferredPythonRuntime(notebook: vscode.NotebookDocument, runtimeId?: string): void {
-    const controllerId = runtimeId ? this.runtimeControllerIds.get(runtimeId) : undefined;
-    const preferred = controllerId ? this.controllers.get(controllerId)?.controller : this.defaultController;
-    if (!preferred) {
-      return;
-    }
-
-    if (this.preferredControllers.get(notebook.uri.toString()) === preferred) {
-      return;
-    }
-    this.preferredControllers.set(notebook.uri.toString(), preferred);
-    for (const registration of this.controllers.values()) {
-      registration.controller.updateNotebookAffinity(
-        notebook,
-        registration.controller === preferred
-          ? vscode.NotebookControllerAffinity.Preferred
-          : vscode.NotebookControllerAffinity.Default
-      );
-    }
-    if (vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString()) {
-      this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
-    }
-  }
-
-  private async selectPreferredControllerIfNeeded(notebook: vscode.NotebookDocument): Promise<void> {
-    await this.refreshPythonRuntimePreference(notebook, false);
-    const documentUri = notebook.uri.toString();
-    const preferred = this.preferredControllers.get(documentUri);
-    const selected = this.selectedControllers.get(documentUri);
-    if (!preferred || preferred === this.defaultController || (selected && selected !== this.defaultController)) {
-      return;
-    }
-    await vscode.commands.executeCommand("_notebook.selectKernel", {
-      id: preferred.id,
-      extension: "AlFontal.rmd-notebooks-vscode"
-    });
-    await this.activateControllerForNotebook(notebook, preferred);
   }
 
   private updatePythonEnvironmentStatus(editor?: vscode.NotebookEditor): void {
@@ -242,180 +159,41 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return;
     }
 
-    const documentUri = editor.notebook.uri.toString();
-    const selectedController = this.selectedControllers.get(documentUri);
-    const preferredController = this.preferredControllers.get(documentUri);
-    const controller = selectedController && selectedController !== this.defaultController
-      ? selectedController
-      : preferredController;
-    const runtime = controller ? this.controllers.get(controller.id)?.runtime : undefined;
+    const runtime = this.getPersistedPythonRuntime(editor.notebook.uri);
     const state = this.pythonDiscovery.getState();
     this.pythonEnvironmentStatus.text = `$(server-environment) Python: ${runtime?.label ?? "Select Environment"}`;
     this.pythonEnvironmentStatus.tooltip = runtime
       ? `${runtime.renderPythonPath}\nClick to select another Python environment.`
-      : `${state.environments} environment(s), ${state.kernelspecs} kernelspec(s) discovered. Click to select.`;
+      : `${state.environments} environment(s) discovered. Click to select.`;
     this.pythonEnvironmentStatus.show();
   }
 
-  private async refreshPythonRuntimePreferences(): Promise<void> {
-    await Promise.all(
-      vscode.workspace.notebookDocuments
-        .filter(isInlineChunksNotebook)
-        .map((notebook) => this.refreshPythonRuntimePreference(notebook))
-    );
+  private getPersistedPythonRuntime(uri: vscode.Uri): PythonLaunchDescriptor | undefined {
+    const value = this.workspaceState.get<unknown>(runtimeSelectionKey(uri));
+    return isPythonLaunchDescriptor(value) ? value : undefined;
   }
 
-  private async refreshPythonRuntimePreference(
-    notebook: vscode.NotebookDocument,
-    promptForMismatch = true
-  ): Promise<void> {
-    const hasPythonCells = notebook.getCells().some(
-      (cell) =>
-        cell.kind === vscode.NotebookCellKind.Code &&
-        ["python", "py"].includes(cell.document.languageId.toLowerCase())
-    );
-    if (!hasPythonCells) {
-      this.setPreferredPythonRuntime(notebook);
+  private async ensurePythonRuntimeSelected(notebook: vscode.NotebookDocument): Promise<void> {
+    if (this.pythonExecutor.getSelectedInterpreter(notebook.uri.toString())) {
       return;
     }
-
-    this.refreshPythonRuntimeControllers(notebook.uri);
-    const runtimes = this.pythonDiscovery.getRuntimes(notebook.uri);
-    const persistedId = this.workspaceState.get<string>(runtimeSelectionKey(notebook.uri));
-    const yamlKernelName = getNotebookJupyterKernel(notebook);
-    const activeEnvironmentId = await this.pythonDiscovery.getActiveEnvironmentId(notebook.uri);
-    const preference = resolvePythonRuntimePreference(runtimes, {
-      persistedId,
-      yamlKernelName,
-      activeEnvironmentId
-    });
-    this.setPreferredPythonRuntime(notebook, preference.runtime?.id);
-
-    if (promptForMismatch && preference.runtime && preference.yamlRuntime && preference.mismatch) {
-      await this.promptToSynchronizeJupyterKernel(notebook, preference.runtime, preference.yamlRuntime);
-    }
-  }
-
-  private async promptToSynchronizeJupyterKernel(
-    notebook: vscode.NotebookDocument,
-    selected: PythonLaunchDescriptor,
-    yamlRuntime: PythonLaunchDescriptor
-  ): Promise<void> {
-    const promptKey = `${notebook.uri.toString()}::${selected.id}::${yamlRuntime.id}`;
-    if (this.promptedYamlMismatches.has(promptKey)) {
-      return;
-    }
-    this.promptedYamlMismatches.add(promptKey);
-    const choice = await vscode.window.showWarningMessage(
-      `This document pins the Jupyter kernel "${yamlRuntime.label}", but "${selected.label}" is selected.`,
-      "Use YAML Kernel",
-      "Use Selected Environment"
-    );
-    if (!choice) {
-      this.promptedYamlMismatches.delete(promptKey);
-      return;
-    }
-    if (choice === "Use YAML Kernel") {
-      await this.selectPythonRuntime(notebook, yamlRuntime, false);
-      return;
-    }
-    if (choice === "Use Selected Environment") {
-      await this.updateNotebookJupyterKernel(notebook, selected.kernelspecNames[0]);
-      await this.selectPythonRuntime(notebook, selected, false);
-    }
-  }
-
-  private createController(
-    id: string,
-    label: string,
-    runtime?: PythonLaunchDescriptor
-  ): vscode.NotebookController {
-    const controller = vscode.notebooks.createNotebookController(id, INLINE_CHUNKS_NOTEBOOK_TYPE, label);
-    controller.supportedLanguages = ["r", "python", "markdown"];
-    controller.supportsExecutionOrder = true;
-    controller.executeHandler = async (cells, notebook, selectedController) => {
-      const documentUri = notebook.uri.toString();
-      await this.controllerSelectionTransitions.get(documentUri)?.catch(() => undefined);
-      const executionController = this.selectedControllers.get(documentUri) ?? selectedController;
-      await this.activateControllerForNotebook(notebook, executionController);
-      this.runsToAbort.delete(documentUri);
-      for (const cell of cells) {
-        if (this.runsToAbort.has(documentUri)) {
-          break;
-        }
-        await this.executeCell(notebook, cell, cell.index, executionController);
-      }
-      this.runsToAbort.delete(documentUri);
-    };
-
-    const selectionListener = controller.onDidChangeSelectedNotebooks((event) => {
-      const documentUri = event.notebook.uri.toString();
-      if (event.selected) {
-        const runtime = this.controllers.get(controller.id)?.runtime;
-        const transition = runtime
-          ? this.selectPythonRuntime(event.notebook, runtime, true, false)
-          : this.activateControllerForNotebook(event.notebook, controller);
-        this.controllerSelectionTransitions.set(documentUri, transition);
-        const cleanup = (): void => {
-          if (this.controllerSelectionTransitions.get(documentUri) === transition) {
-            this.controllerSelectionTransitions.delete(documentUri);
-          }
-        };
-        void transition.then(cleanup, cleanup);
-      } else if (this.selectedControllers.get(documentUri) === controller) {
-        this.selectedControllers.delete(documentUri);
-      }
-    });
-    this.controllers.set(id, { controller, runtime, selectionListener });
-    return controller;
-  }
-
-  private disposeController(controllerId: string): void {
-    const registration = this.controllers.get(controllerId);
-    if (!registration || registration.controller === this.defaultController) {
-      return;
-    }
-    this.controllers.delete(controllerId);
-    registration.selectionListener.dispose();
-    registration.controller.dispose();
-
-    for (const [documentUri, controller] of [...this.selectedControllers]) {
-      if (controller === registration.controller) {
-        this.selectedControllers.delete(documentUri);
-      }
-    }
-    for (const [documentUri, controller] of [...this.preferredControllers]) {
-      if (controller === registration.controller) {
-        this.preferredControllers.set(documentUri, this.defaultController);
-      }
-    }
-  }
-
-  private async activateControllerForNotebook(
-    notebook: vscode.NotebookDocument,
-    controller: vscode.NotebookController
-  ): Promise<void> {
-    this.selectedControllers.set(notebook.uri.toString(), controller);
-    const runtime = this.controllers.get(controller.id)?.runtime;
-    if (runtime) {
-      await this.workspaceState.update(runtimeSelectionKey(notebook.uri), runtime.id);
-    } else {
-      await this.workspaceState.update(runtimeSelectionKey(notebook.uri), undefined);
-    }
-    await this.pythonExecutor.selectInterpreter(
-      notebook.uri.toString(),
-      runtime
-        ? {
-            id: runtime.id,
-            path: runtime.executable,
-            prefixArgs: runtime.prefixArgs,
-            renderPythonPath: runtime.renderPythonPath,
-            environmentVariables: runtime.environmentVariables
-          }
-        : undefined
-    );
-    if (vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString()) {
+    const persisted = this.getPersistedPythonRuntime(notebook.uri);
+    if (persisted) {
+      await this.pythonExecutor.selectInterpreter(notebook.uri.toString(), toInterpreterSelection(persisted));
       this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
+      return;
+    }
+
+    await this.pythonDiscovery.ensureInitialized();
+    const runtimes = this.pythonDiscovery.getRuntimes(notebook.uri);
+    const activeEnvironmentId = await this.pythonDiscovery.getActiveEnvironmentId(notebook.uri);
+    const selected =
+      runtimes.find((runtime) => runtime.environmentId === activeEnvironmentId) ??
+      runtimes.find((runtime) => runtime.source === "configured") ??
+      runtimes.find((runtime) => runtime.source === "environmentVariable") ??
+      runtimes.find((runtime) => runtime.source === "fallback");
+    if (selected) {
+      await this.selectPythonRuntime(notebook, selected);
     }
   }
 
@@ -425,9 +203,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       void vscode.window.showWarningMessage("Rmd Notebooks: open a qmd notebook to select Python.");
       return;
     }
-    this.refreshPythonRuntimeControllers(notebook.uri);
+    await this.pythonDiscovery.ensureInitialized();
     const runtimes = this.pythonDiscovery.getRuntimes(notebook.uri);
-    const selectedId = this.workspaceState.get<string>(runtimeSelectionKey(notebook.uri));
+    const selectedId = this.getPersistedPythonRuntime(notebook.uri)?.id;
     type PickerItem = vscode.QuickPickItem & {
       runtime?: PythonLaunchDescriptor;
       action?: "refresh" | "path";
@@ -465,9 +243,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     pickerDisposables.forEach((disposable) => disposable.dispose());
     picker.dispose();
     if (picked?.runtime) {
-      await this.selectPythonRuntime(notebook, picked.runtime, true);
+      await this.selectPythonRuntime(notebook, picked.runtime);
     } else if (picked?.action === "refresh") {
-      await this.refreshPythonEnvironments();
+      await this.pythonDiscovery.refresh(true);
+      this.logPythonDiscoveryState();
       await this.selectPythonEnvironment(notebook.uri.toString());
     } else if (picked?.action === "path") {
       const executable = await vscode.window.showInputBox({
@@ -476,29 +255,20 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         value: vscode.workspace.getConfiguration("rmdNotebooks", notebook.uri).get<string>("python.path", "")
       });
       if (executable?.trim()) {
-        await vscode.workspace
-          .getConfiguration("rmdNotebooks", notebook.uri)
-          .update("python.path", executable.trim(), vscode.ConfigurationTarget.Workspace);
-        this.refreshPythonRuntimeControllers(notebook.uri);
-        const configured = this.pythonDiscovery
-          .getRuntimes(notebook.uri)
-          .find((runtime) => runtime.source === "configured");
-        if (configured) {
-          await this.selectPythonRuntime(notebook, configured, true);
-        }
+        const manual: PythonLaunchDescriptor = {
+          id: `manual:${notebook.uri.toString()}:${executable.trim()}`,
+          label: path.basename(executable.trim()) || "Manual Python",
+          description: "Manual executable",
+          detail: executable.trim(),
+          source: "manual",
+          executable: executable.trim(),
+          prefixArgs: [],
+          renderPythonPath: executable.trim(),
+          environmentVariables: undefined
+        };
+        await this.selectPythonRuntime(notebook, manual);
       }
     }
-  }
-
-  public async refreshPythonEnvironments(): Promise<void> {
-    await this.pythonDiscovery.refresh();
-    this.refreshPythonRuntimeControllers();
-    this.logPythonDiscoveryState();
-    await this.refreshPythonRuntimePreferences();
-    const state = this.pythonDiscovery.getState();
-    void vscode.window.showInformationMessage(
-      `Rmd Notebooks: found ${state.environments} Python environment(s) and ${state.kernelspecs} kernelspec(s).`
-    );
   }
 
   public getSelectedPythonRenderPath(documentUri?: string): string | undefined {
@@ -510,74 +280,16 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     if (selected?.renderPythonPath) {
       return selected.renderPythonPath;
     }
-    const preferred = this.preferredControllers.get(notebook.uri.toString());
-    const preferredRuntime = preferred ? this.controllers.get(preferred.id)?.runtime : undefined;
-    if (preferredRuntime) {
-      return preferredRuntime.renderPythonPath;
-    }
-    const persistedId = this.workspaceState.get<string>(runtimeSelectionKey(notebook.uri));
-    return this.pythonDiscovery
-      .getRuntimes(notebook.uri)
-      .find((runtime) => runtime.id === persistedId)?.renderPythonPath;
+    return this.getPersistedPythonRuntime(notebook.uri)?.renderPythonPath;
   }
 
   private async selectPythonRuntime(
     notebook: vscode.NotebookDocument,
-    runtime: PythonLaunchDescriptor,
-    synchronizeYaml: boolean,
-    selectController = true
+    runtime: PythonLaunchDescriptor
   ): Promise<void> {
-    if (synchronizeYaml) {
-      const yamlKernel = getNotebookJupyterKernel(notebook);
-      const yamlRuntime = yamlKernel
-        ? this.pythonDiscovery.getRuntimes(notebook.uri).find((candidate) => candidate.kernelspecNames.includes(yamlKernel))
-        : undefined;
-      if (yamlRuntime && yamlRuntime.id !== runtime.id) {
-        await this.promptToSynchronizeJupyterKernel(notebook, runtime, yamlRuntime);
-        return;
-      }
-    }
-
-    await this.workspaceState.update(runtimeSelectionKey(notebook.uri), runtime.id);
-    this.setPreferredPythonRuntime(notebook, runtime.id);
-    const controllerId = this.runtimeControllerIds.get(runtime.id);
-    const controller = controllerId ? this.controllers.get(controllerId)?.controller : undefined;
-    if (!controller) {
-      return;
-    }
-    if (selectController && vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString()) {
-      await vscode.commands.executeCommand("_notebook.selectKernel", {
-        id: controller.id,
-        extension: "AlFontal.rmd-notebooks-vscode"
-      });
-    }
-    await this.activateControllerForNotebook(notebook, controller);
-  }
-
-  private async updateNotebookJupyterKernel(
-    notebook: vscode.NotebookDocument,
-    kernelName?: string
-  ): Promise<void> {
-    const frontmatter = notebook.getCells().find(
-      (cell) => getInlineChunksMetadata(cell.metadata)?.kind === "frontmatter"
-    );
-    if (!frontmatter) {
-      return;
-    }
-    const current = frontmatter.document.getText();
-    const updated = updateJupyterFrontmatter(current, kernelName);
-    if (updated === current) {
-      return;
-    }
-    const lastLine = frontmatter.document.lineAt(frontmatter.document.lineCount - 1);
-    const edit = new vscode.WorkspaceEdit();
-    edit.replace(
-      frontmatter.document.uri,
-      new vscode.Range(new vscode.Position(0, 0), lastLine.range.end),
-      updated
-    );
-    await vscode.workspace.applyEdit(edit);
-    await notebook.save();
+    await this.workspaceState.update(runtimeSelectionKey(notebook.uri), runtime);
+    await this.pythonExecutor.selectInterpreter(notebook.uri.toString(), toInterpreterSelection(runtime));
+    this.updatePythonEnvironmentStatus(vscode.window.activeNotebookEditor);
   }
 
   private async handleMissingIPython(event: {
@@ -778,6 +490,21 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     };
   }
 
+  public async selectTestPythonInterpreter(documentUri: string, executable: string): Promise<void> {
+    const notebook = this.resolveNotebook(documentUri);
+    if (!notebook) {
+      return;
+    }
+    await this.selectPythonRuntime(notebook, {
+      id: `manual:test:${executable}`,
+      label: "Test Python",
+      source: "manual",
+      executable,
+      prefixArgs: [],
+      renderPythonPath: executable
+    });
+  }
+
   public async getDocumentState(documentUri: string): Promise<{
     snapshot: { documentUri: string; version: number; chunkIds: string[] } | undefined;
     outputs: Array<{ chunkId: string; status: string; stale: boolean; outputTypes: string[] }>;
@@ -886,11 +613,6 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
     this.inlineStaleTimers.clear();
     this.disposables.forEach((disposable) => disposable.dispose());
-    for (const registration of this.controllers.values()) {
-      registration.selectionListener.dispose();
-      registration.controller.dispose();
-    }
-    this.controllers.clear();
   }
 
   private async handleNotebookOpened(notebook: vscode.NotebookDocument): Promise<void> {
@@ -898,10 +620,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return;
     }
 
-    this.refreshPythonRuntimeControllers(notebook.uri);
-    await this.refreshPythonRuntimePreference(notebook);
-    const preferred = this.preferredControllers.get(notebook.uri.toString()) ?? this.defaultController;
-    preferred.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
+    this.controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
     await this.refreshNotebook(notebook);
     await this.restoreOutputsToNotebook(notebook);
     await this.collapseInlineInputs(notebook);
@@ -973,9 +692,6 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
 
     await this.refreshNotebook(notebook);
-    if (event.contentChanges.length > 0 || event.cellChanges.some((change) => change.document !== undefined)) {
-      await this.refreshPythonRuntimePreference(notebook, false);
-    }
     if (event.cellChanges.some(
       (change) => change.document !== undefined && getInlineChunksMetadata(change.cell.metadata)?.kind === "inline"
     )) {
@@ -989,9 +705,6 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     }
 
     this.snapshots.delete(notebook.uri.toString());
-    this.selectedControllers.delete(notebook.uri.toString());
-    this.preferredControllers.delete(notebook.uri.toString());
-    this.controllerSelectionTransitions.delete(notebook.uri.toString());
     this.notebookInitializations.delete(notebook.uri.toString());
     this.collapsedInlineDocuments.delete(notebook.uri.toString());
     this.outputRestorations.delete(notebook.uri.toString());
@@ -1009,8 +722,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private async executeCell(
     notebook: vscode.NotebookDocument,
     cell: vscode.NotebookCell,
-    targetIndex = cell.index,
-    controller?: vscode.NotebookController
+    targetIndex = cell.index
   ): Promise<ExecuteCellOutcome> {
     const cellIndex = targetIndex;
     await this.notebookInitializations.get(notebook.uri.toString())?.catch(() => undefined);
@@ -1030,7 +742,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     const releaseAdmission = await this.acquireExecutionAdmission(notebook.uri.toString());
     try {
-      return await this.executeAdmittedCell(notebook, currentCell, releaseAdmission, controller);
+      return await this.executeAdmittedCell(notebook, currentCell, releaseAdmission);
     } finally {
       releaseAdmission();
     }
@@ -1039,8 +751,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
   private async executeAdmittedCell(
     notebook: vscode.NotebookDocument,
     cell: vscode.NotebookCell,
-    releaseAdmission: () => void,
-    requestedController?: vscode.NotebookController
+    releaseAdmission: () => void
   ): Promise<ExecuteCellOutcome> {
     const snapshot = await this.refreshNotebook(notebook);
     const entry = snapshot.chunks.find((candidate) => candidate.index === cell.index);
@@ -1051,13 +762,15 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     const outputs = await this.ensureOutputsLoaded(notebook.uri.toString());
     const executor = this.executorRegistry.get(entry.chunk.language);
+    if (["python", "py"].includes(entry.chunk.language.toLowerCase())) {
+      await this.ensurePythonRuntimeSelected(notebook);
+    }
     const chunkOptions = getChunkOptions(cell);
     const isInline = entry.sourceKind === "inline";
-    const selectedController = requestedController ?? await this.ensureControllerSelected(notebook);
+    const selectedController = await this.ensureControllerSelected(notebook);
     if (!selectedController) {
       return "completed";
     }
-    await this.activateControllerForNotebook(notebook, selectedController);
     const execution = selectedController.createNotebookCellExecution(notebook.cellAt(entry.index));
     // Leave the cell in the "queued" (pending clock) state until the chunk actually
     // begins running in its language session, instead of marking it running the
@@ -1647,20 +1360,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       return undefined;
     }
 
-    const documentUri = notebook.uri.toString();
-    const selected = this.selectedControllers.get(documentUri);
-    if (selected) {
-      await this.activateControllerForNotebook(notebook, selected);
-      return selected;
-    }
-
-    const controller = this.preferredControllers.get(documentUri) ?? this.defaultController;
     await vscode.commands.executeCommand("_notebook.selectKernel", {
-      id: controller.id,
+      id: this.controller.id,
       extension: "AlFontal.rmd-notebooks-vscode"
     });
-    await this.activateControllerForNotebook(notebook, controller);
-    return controller;
+    return this.controller;
   }
 
   private async handleInteractiveFallback(
@@ -1726,6 +1430,44 @@ function getNotebookJupyterKernel(notebook: vscode.NotebookDocument): string | u
 
 function runtimeSelectionKey(uri: vscode.Uri): string {
   return `pythonRuntime:${uri.toString()}`;
+}
+
+function hasPythonCells(notebook: vscode.NotebookDocument): boolean {
+  return notebook.getCells().some(
+    (cell) =>
+      cell.kind === vscode.NotebookCellKind.Code &&
+      ["python", "py"].includes(cell.document.languageId.toLowerCase())
+  );
+}
+
+function isPythonLaunchDescriptor(value: unknown): value is PythonLaunchDescriptor {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<PythonLaunchDescriptor>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.label === "string" &&
+    typeof candidate.executable === "string" &&
+    typeof candidate.renderPythonPath === "string" &&
+    Array.isArray(candidate.prefixArgs)
+  );
+}
+
+function toInterpreterSelection(runtime: PythonLaunchDescriptor): {
+  id: string;
+  path: string;
+  prefixArgs: string[];
+  renderPythonPath: string;
+  environmentVariables?: Record<string, string | undefined>;
+} {
+  return {
+    id: runtime.id,
+    path: runtime.executable,
+    prefixArgs: [...runtime.prefixArgs],
+    renderPythonPath: runtime.renderPythonPath,
+    environmentVariables: runtime.environmentVariables
+  };
 }
 
 function quoteShellArgument(value: string): string {

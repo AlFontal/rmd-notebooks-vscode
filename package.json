@@ -102,12 +102,6 @@
         "icon": "$(server-environment)"
       },
       {
-        "command": "rmdNotebooks.refreshPythonEnvironments",
-        "title": "Refresh Python Environments",
-        "category": "Rmd Notebooks",
-        "icon": "$(refresh)"
-      },
-      {
         "command": "rmdNotebooks.runCurrentChunkInTerminal",
         "title": "Rmd Notebooks: Run Current Chunk in R Terminal"
       },
@@ -137,11 +131,6 @@
     ],
     "menus": {
       "notebook/toolbar": [
-        {
-          "command": "rmdNotebooks.selectPythonEnvironment",
-          "when": "notebookType == rmd-notebooks-vscode-notebook && resourceExtname == .qmd",
-          "group": "navigation@95"
-        },
         {
           "command": "rmdNotebooks.previewHtml",
           "when": "notebookType == rmd-notebooks-vscode-notebook && resourceExtname =~ /\\.[Rr]md$/",

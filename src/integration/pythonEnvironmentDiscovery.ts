@@ -1,14 +1,11 @@
 import * as vscode from "vscode";
-import { realpath } from "node:fs/promises";
-import * as path from "node:path";
 import { PythonEnvironment, PythonEnvironmentApi, PythonEnvironments } from "@vscode/python-environments";
-import { mergePythonRuntimes, PythonLaunchDescriptor } from "../execution/pythonRuntimeTypes";
-import { discoverPythonKernelspecs } from "./jupyterKernelspecDiscovery";
+import { createEnvironmentRuntime, PythonLaunchDescriptor } from "../execution/pythonRuntimeTypes";
 
 export interface PythonRuntimeCatalogState {
+  initialized: boolean;
   available: boolean;
   environments: number;
-  kernelspecs: number;
   error?: string;
 }
 
@@ -18,31 +15,21 @@ export class PythonEnvironmentDiscovery implements vscode.Disposable {
   private readonly environmentByRuntimeId = new Map<string, PythonEnvironment>();
   private api: PythonEnvironmentApi | undefined;
   private runtimes: PythonLaunchDescriptor[] = [];
+  private initializationPromise: Promise<void> | undefined;
   private refreshPromise: Promise<void> | undefined;
   private state: PythonRuntimeCatalogState = {
+    initialized: false,
     available: false,
-    environments: 0,
-    kernelspecs: 0
+    environments: 0
   };
 
   public readonly onDidChangeRuntimes = this.changeEmitter.event;
 
-  public async initialize(): Promise<void> {
-    try {
-      this.api = await PythonEnvironments.api();
-      this.disposables.push(
-        this.api.onDidChangeEnvironments(() => void this.refresh()),
-        this.api.onDidChangeEnvironment(() => this.changeEmitter.fire())
-      );
-    } catch (error) {
-      this.state = {
-        available: false,
-        environments: 0,
-        kernelspecs: 0,
-        error: toErrorMessage(error)
-      };
+  public ensureInitialized(): Promise<void> {
+    if (!this.initializationPromise) {
+      this.initializationPromise = this.initializeOnce();
     }
-    await this.refresh();
+    return this.initializationPromise;
   }
 
   public dispose(): void {
@@ -61,121 +48,141 @@ export class PythonEnvironmentDiscovery implements vscode.Disposable {
       .get<string>("python.path", "")
       .trim();
     if (configuredPath) {
-      additions.push({
-        id: `configured:${configuredPath}`,
-        label: "Configured Python",
-        description: "rmdNotebooks.python.path",
-        detail: configuredPath,
-        source: "configured",
-        executable: configuredPath,
-        prefixArgs: [],
-        renderPythonPath: configuredPath,
-        kernelspecNames: []
-      });
+      additions.push(runtimeForPath("configured", configuredPath, "Configured Python", "rmdNotebooks.python.path"));
     }
-
+    const quartoPython = process.env.QUARTO_PYTHON?.trim();
+    if (quartoPython) {
+      additions.push(runtimeForPath("environmentVariable", quartoPython, "Quarto Python", "QUARTO_PYTHON"));
+    }
     const fallbackExecutable = process.platform === "win32" ? "python" : "python3";
-    additions.push({
-      id: `fallback:${fallbackExecutable}`,
-      label: `Default ${fallbackExecutable}`,
-      description: "PATH fallback",
-      detail: fallbackExecutable,
-      source: "fallback",
-      executable: fallbackExecutable,
-      prefixArgs: [],
-      renderPythonPath: fallbackExecutable,
-      kernelspecNames: []
-    });
+    additions.push(runtimeForPath("fallback", fallbackExecutable, `Default ${fallbackExecutable}`, "PATH fallback"));
     return [...this.runtimes, ...additions];
   }
 
   public async getActiveEnvironmentId(resource?: vscode.Uri): Promise<string | undefined> {
+    if (!this.state.initialized) {
+      return undefined;
+    }
     const environment = await this.api?.getEnvironment(resource);
     return environment ? environmentRuntimeId(environment) : undefined;
   }
 
-  public async refresh(): Promise<void> {
-    if (this.refreshPromise) {
+  public async refresh(force = false): Promise<void> {
+    await this.ensureInitialized();
+    if (!force && this.refreshPromise) {
       return this.refreshPromise;
     }
-    this.refreshPromise = this.performRefresh().finally(() => {
-      this.refreshPromise = undefined;
-    });
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.performRefresh(force).finally(() => {
+        this.refreshPromise = undefined;
+      });
+    }
     return this.refreshPromise;
   }
 
   public async installIPython(runtimeId: string): Promise<boolean> {
+    await this.ensureInitialized();
     const environment = this.environmentByRuntimeId.get(runtimeId);
     if (!this.api || !environment) {
       return false;
     }
-    await this.api.managePackages(environment, {
-      install: ["ipython"],
-      showSkipOption: true
-    });
+    await this.api.managePackages(environment, { install: ["ipython"], showSkipOption: true });
     return true;
   }
 
-  private async performRefresh(): Promise<void> {
-    let environments: PythonLaunchDescriptor[] = [];
-    let environmentError: string | undefined;
-    this.environmentByRuntimeId.clear();
-
-    if (this.api) {
-      try {
-        await this.api.refreshEnvironments(undefined);
-        const discovered = await this.api.getEnvironments("all");
-        const resolved = await Promise.all(
-          discovered.map(async (environment) =>
-            (await this.api?.resolveEnvironment(environment.environmentPath)) ?? environment
-          )
-        );
-        const environmentRuntimes = await Promise.all(resolved.map((environment) => toRuntimeDescriptor(environment)));
-        environments = environmentRuntimes.flatMap((runtime, index) => {
-          if (!runtime) {
-            return [];
-          }
-          this.environmentByRuntimeId.set(runtime.id, resolved[index]);
-          return [runtime];
-        });
-      } catch (error) {
-        environmentError = toErrorMessage(error);
-      }
+  private async initializeOnce(): Promise<void> {
+    try {
+      this.api = await PythonEnvironments.api();
+      this.disposables.push(
+        this.api.onDidChangeEnvironments(() => void this.refresh(true)),
+        this.api.onDidChangeEnvironment(() => this.changeEmitter.fire())
+      );
+      this.state = { initialized: true, available: true, environments: 0 };
+      await this.performRefresh(false);
+    } catch (error) {
+      this.state = {
+        initialized: true,
+        available: false,
+        environments: 0,
+        error: error instanceof Error ? error.message : String(error)
+      };
+      this.changeEmitter.fire();
     }
+  }
 
-    const kernelspecs = await discoverPythonKernelspecs();
-    this.runtimes = mergePythonRuntimes(environments, kernelspecs);
-    this.state = {
-      available: Boolean(this.api) || kernelspecs.length > 0,
-      environments: environments.length,
-      kernelspecs: kernelspecs.length,
-      error: environmentError ?? (this.api ? undefined : this.state.error)
-    };
-    this.changeEmitter.fire();
+  private async performRefresh(force: boolean): Promise<void> {
+    if (!this.api) {
+      return;
+    }
+    try {
+      if (force) {
+        await this.api.refreshEnvironments(undefined);
+      }
+      const discovered = await this.api.getEnvironments("all");
+      const resolved = await Promise.all(
+        discovered.map(async (environment) =>
+          (await this.api?.resolveEnvironment(environment.environmentPath)) ?? environment
+        )
+      );
+      this.environmentByRuntimeId.clear();
+      this.runtimes = resolved.flatMap((environment) => {
+        const runtime = toRuntimeDescriptor(environment);
+        if (!runtime) {
+          return [];
+        }
+        this.environmentByRuntimeId.set(runtime.id, environment);
+        return [runtime];
+      }).sort((left, right) => left.label.localeCompare(right.label));
+      this.state = {
+        initialized: true,
+        available: true,
+        environments: this.runtimes.length
+      };
+      this.changeEmitter.fire();
+    } catch (error) {
+      this.state = {
+        initialized: true,
+        available: true,
+        environments: 0,
+        error: error instanceof Error ? error.message : String(error)
+      };
+      this.changeEmitter.fire();
+    }
   }
 }
 
-async function toRuntimeDescriptor(environment: PythonEnvironment): Promise<PythonLaunchDescriptor | undefined> {
+export function toRuntimeDescriptor(environment: PythonEnvironment): PythonLaunchDescriptor | undefined {
   const run = environment.execInfo.activatedRun ?? environment.execInfo.run;
-  if (!run?.executable) {
+  const renderPythonPath = environment.execInfo.run.executable;
+  if (!run?.executable || !renderPythonPath) {
     return undefined;
   }
-  const rawRenderPythonPath = environment.execInfo.run.executable;
-  const renderPythonPath = path.isAbsolute(rawRenderPythonPath)
-    ? await realpath(rawRenderPythonPath).catch(() => rawRenderPythonPath)
-    : rawRenderPythonPath;
-  const executable = run.executable === rawRenderPythonPath ? renderPythonPath : run.executable;
-  return {
+  return createEnvironmentRuntime({
     id: environmentRuntimeId(environment),
     label: environment.displayName || environment.name || "Python",
     description: environment.description ?? formatGroup(environment.group),
     detail: environment.displayPath || renderPythonPath,
-    source: "environment",
-    executable,
+    executable: run.executable,
     prefixArgs: [...(run.args ?? [])],
-    renderPythonPath,
-    environmentId: environmentRuntimeId(environment),
-    kernelspecNames: []
+    renderPythonPath
+  });
+}
+
+function runtimeForPath(
+  source: "configured" | "environmentVariable" | "fallback",
+  executable: string,
+  label: string,
+  description: string
+): PythonLaunchDescriptor {
+  return {
+    id: `${source}:${executable}`,
+    label,
+    description,
+    detail: executable,
+    source,
+    executable,
+    prefixArgs: [],
+    renderPythonPath: executable
   };
 }
 
@@ -188,8 +195,4 @@ function formatGroup(group: PythonEnvironment["group"]): string | undefined {
     return undefined;
   }
   return typeof group === "string" ? group : group.description ?? group.name;
-}
-
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

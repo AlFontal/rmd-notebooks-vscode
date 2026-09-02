@@ -33,9 +33,6 @@ export function registerCommands(controller: InlineChunksNotebookRuntime): vscod
     vscode.commands.registerCommand("rmdNotebooks.selectPythonEnvironment", async (documentUri?: string) => {
       await controller.selectPythonEnvironment(documentUri);
     }),
-    vscode.commands.registerCommand("rmdNotebooks.refreshPythonEnvironments", async () => {
-      await controller.refreshPythonEnvironments();
-    }),
     vscode.commands.registerCommand("rmdNotebooks.runCurrentChunkInTerminal", async (documentUri?: string, chunkId?: string) => {
       await controller.runCurrentChunkInTerminal(documentUri, chunkId);
     }),

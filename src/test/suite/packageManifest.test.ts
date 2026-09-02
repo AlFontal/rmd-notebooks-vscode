@@ -30,14 +30,12 @@ describe("package manifest", () => {
     assert.equal(properties["rmdNotebooks.python.startupTimeoutMs"].default, 30000);
   });
 
-  it("keeps Python environment selection visible in qmd notebooks", () => {
+  it("contributes one Python environment selector command", () => {
     assert.ok(packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.selectPythonEnvironment"));
-    assert.ok(packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.refreshPythonEnvironments"));
-    assert.ok(
-      packageJson.contributes.menus["notebook/toolbar"].some(
-        (entry) => entry.command === "rmdNotebooks.selectPythonEnvironment" && entry.when.endsWith("resourceExtname == .qmd")
-      )
-    );
+    assert.ok(!packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.refreshPythonEnvironments"));
+    assert.ok(!packageJson.contributes.menus["notebook/toolbar"].some(
+      (entry) => entry.command === "rmdNotebooks.selectPythonEnvironment"
+    ));
   });
 
   it("contributes HTML preview for both Rmd and qmd notebooks", () => {
