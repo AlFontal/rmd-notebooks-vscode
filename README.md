@@ -59,9 +59,11 @@ Python chunks use the selected interpreter directly and run from the source file
 
 ## Python Environment Selection
 
-Use **Rmd Notebooks: Select Python Environment** from the Command Palette or click the always-visible `Python: <environment>` status-bar control. Results appear immediately and fuzzy-match environment names, versions, managers, and paths. Rmd Notebooks automatically selects the file/workspace-active environment initially and remembers explicit choices per document.
+Choose an `Rmd: <environment>` entry in the notebook's native kernel picker, use **Rmd Notebooks: Select Python Environment** from the Command Palette, or click the `Python: <environment>` status-bar control shown for notebooks containing Python cells. The command picker shows cached and manual choices immediately, updates as discovery completes, and fuzzy-matches environment names, versions, managers, and paths.
 
-The Marketplace package installs the Python Environments integration automatically. In hosts where it is unavailable, `rmdNotebooks.python.path`, `QUARTO_PYTHON`, manual selection, and the platform PATH fallback remain available. Changing environments disposes the old per-document Python session and starts a fresh session on the next run.
+The default **Rmd Notebooks** controller follows the file/workspace-active Python environment, with configured and PATH fallbacks. Explicit choices are remembered per document; choose **Automatic — Follow Workspace Python** in the command picker (or switch back to the default controller) to remove an override. Automatic selection is re-evaluated on execution. Existing v0.6.0 environment choices are retained because that release did not distinguish automatic from explicit choices; reset these to Automatic if needed.
+
+The Marketplace package installs the Python Environments integration automatically. In hosts where it is unavailable, `rmdNotebooks.python.path`, `QUARTO_PYTHON`, manual selection, and the platform PATH fallback remain available. Changing environments disposes the old per-document Python session and starts a fresh session on the next run. Environment identities are resolved from the current catalog rather than reusing stored executable paths. Project environment variables supplied by the Python Environments API are resolved for execution and are not saved in notebook preferences. After a Python process crashes, the next execution starts a fresh session.
 
 Rmd Notebooks does not rewrite `jupyter:` frontmatter or treat kernelspecs as execution environments. For a Python-only qmd file without an explicit `jupyter:` pin, extension-triggered Quarto previews receive the selected interpreter through a scoped `QUARTO_PYTHON` override. Mixed R/Python documents and explicitly pinned documents remain under Quarto's own runtime rules.
 
@@ -121,7 +123,7 @@ If you do not want inline sessions to source vscode-R's watcher, disable:
 - `Rmd Notebooks: Edit Chunk Header`
 - `Rmd Notebooks: Toggle Notebook / Raw Source View`
 
-The notebook toolbar exposes `Stop All Running Chunks`, `Restart Execution Sessions`, and `View Source`. Python selection stays available in the status bar and Command Palette without adding a second controller to the notebook kernel picker.
+The notebook toolbar exposes `Stop All Running Chunks`, `Restart Execution Sessions`, and `View Source`. Python environments also appear as native notebook controllers; each controller retains R execution support for mixed-language notebooks.
 
 ## Settings
 
@@ -163,13 +165,15 @@ sum(values)
 
 ## Development
 
+Use Node.js 22 or newer for the development tools.
+
 ```bash
 npm install
 npm run compile
 npm test
 ```
 
-`npm test` is the full local verification path, including the real VS Code extension-host suite. GitHub Actions stays lighter and only runs the unit tests plus packaging checks.
+`npm test` is the full local verification path, including the real VS Code extension-host suite. The host suite downloads the latest stable VS Code release and installs compatible extension dependencies. GitHub Actions runs unit tests, packaging checks, and the extension-host suite.
 
 For changes that affect R startup behavior, run the local `renv` smoke test:
 
@@ -220,7 +224,7 @@ npm run dev:example:rmd
 - GitHub Actions runs the lightweight repository checks on pushes and pull requests.
 - Pull request builds upload a branch-and-SHA-named `.vsix` artifact for manual testing.
 - GitHub Actions also handles the release path: it checks that the release tag matches `package.json`, packages the extension as a `.vsix`, attaches it to GitHub releases, and publishes release tags to both the VS Code Marketplace and Open VSX.
-- The full macOS extension-host test flow is kept as a local verification step via `npm test`.
+- CI runs the extension-host suite on Linux; `npm test` also supports full local verification, including macOS.
 
 ## Example Notebooks
 

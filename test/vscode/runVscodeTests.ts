@@ -21,7 +21,7 @@ async function main(): Promise<void> {
     await fs.rm(resultFilePath, { force: true });
     await fs.rm(proofFilePath, { force: true });
     await runTests({
-      version: "1.112.0",
+      version: "stable",
       extensionDevelopmentPath,
       extensionTestsPath,
       launchArgs: [
@@ -87,7 +87,7 @@ async function installLocalExtensionDependencies(extensionDevelopmentPath: strin
 
   for (const extensionId of extensionIds) {
     await runVSCodeCommand(["--install-extension", extensionId, "--force"], {
-      version: "1.112.0",
+      version: "stable",
       reuseMachineInstall: false,
       spawn: {
         env: {

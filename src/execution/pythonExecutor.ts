@@ -148,7 +148,7 @@ export class PythonExecutor implements Executor {
       return existing;
     }
 
-    const configuration = vscode.workspace.getConfiguration("rmdNotebooks");
+    const configuration = vscode.workspace.getConfiguration("rmdNotebooks", vscode.Uri.parse(documentUri));
     const selection = this.selections.get(documentUri);
     const configuredPath = configuration.get<string>("python.path", "").trim();
     const pythonPath = selection?.path || configuredPath || (process.platform === "win32" ? "python" : "python3");
@@ -164,7 +164,10 @@ export class PythonExecutor implements Executor {
       scriptPath,
       workspaceFolder,
       startupTimeoutMs,
-      selection?.environmentVariables
+      selection?.environmentVariables,
+      () => {
+        if (this.sessions.get(documentUri) === created) this.sessions.delete(documentUri);
+      }
     );
     this.sessions.set(documentUri, created);
     void created.ready().then(undefined, () => {
@@ -198,7 +201,8 @@ class PythonSession {
     scriptPath: string,
     startupDirectory?: string,
     startupTimeoutMs = 30000,
-    environmentVariables?: Record<string, string | undefined>
+    environmentVariables?: Record<string, string | undefined>,
+    private readonly onDeath: () => void = () => {}
   ) {
     this.process = spawn(pythonPath, [...pythonArgs, scriptPath], {
       stdio: "pipe",
@@ -223,11 +227,15 @@ class PythonSession {
       );
     }, startupTimeoutMs);
 
-    this.lineReader.on("line", (line) => this.handleStdoutLine(line));
+    this.lineReader.on("line", (line) => {
+      try { this.handleStdoutLine(line); }
+      catch (error) { this.handleProcessFailure(error instanceof Error ? error : new Error(String(error))); }
+    });
     this.process.stderr.on("data", (chunk) => {
       this.runtimeStderr += chunk.toString();
     });
     this.process.on("error", (error) => this.handleProcessFailure(error));
+    this.process.stdin.on("error", (error) => this.handleProcessFailure(error));
     this.process.on("exit", (code, signal) => {
       this.handleProcessFailure(
         new Error(`Python session exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"}).`)
@@ -263,6 +271,8 @@ class PythonSession {
 
   public async dispose(cancelExecutions = true): Promise<void> {
     this.alive = false;
+    this.readyReject(new CancelledExecutionError("Python session was disposed."));
+    this.onDeath();
     clearTimeout(this.startTimer);
     if (cancelExecutions) {
       this.failQueue(new CancelledExecutionError("Python session was disposed."));
@@ -297,6 +307,7 @@ class PythonSession {
     this.ready().then(
       () => {
         this.starting = false;
+        if (!this.alive) return;
         const task = this.queue.shift();
         if (task) {
           this.beginExecution(task);
@@ -374,8 +385,10 @@ class PythonSession {
       const response = task.request.promptHandler
         ? await task.request.promptHandler(request)
         : { cancelled: true } satisfies InteractivePromptResponse;
+      if (!this.alive || this.pending !== task) return;
       this.process.stdin.write(PROMPT_RESPONSE_PREFIX + encodeMessage(response) + "\n");
     } catch (error) {
+      if (!this.alive || this.pending !== task) return;
       this.process.stdin.write(PROMPT_RESPONSE_PREFIX + encodeMessage({ cancelled: true }) + "\n");
       task.reject(error instanceof Error ? error : new Error(String(error)));
       // Keep the task occupying the session until Python consumes the cancelled
@@ -400,6 +413,10 @@ class PythonSession {
     this.pending?.reject(error);
     this.pending = undefined;
     this.failQueue(error);
+    this.lineReader.close();
+    this.process.stdin.destroy();
+    this.process.kill();
+    this.onDeath();
   }
 
   private failQueue(error: Error): void {
