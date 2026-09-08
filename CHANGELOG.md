@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1
+
+- expose Python environments in the native notebook kernel picker while retaining R execution in mixed-language notebooks
+- keep environment selection responsive during discovery, support manual executable paths, and add reset-to-Automatic selection
+- prevent automatic selection from overwriting explicit choices, resolve saved environment identities against the current catalog, and apply document-scoped environment variables without persisting their values
+- recover from partial discovery failures and Python process crashes, and finalize pending cells correctly when environment preparation fails or is cancelled
+- test against the latest stable VS Code host, with regressions for native environment switching, mixed R/Python execution, selection races, and cancellation
+
 ## 0.6.0
 
 - execute `{python}` chunks in persistent per-document IPython sessions, with lazy global environment discovery, immediate fuzzy selection from the status bar or Command Palette, source-directory imports, ordered stream/IPython display output, Quarto `#|` options, scoped preview alignment, plots, prompts, cancellation, and session restart support (#27)

@@ -1,4 +1,9 @@
 import { strict as assert } from "node:assert";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, before, beforeEach, describe, it } from "mocha";
 import * as vscode from "vscode";
 import { PreviewServices, previewNotebookHtml, withQuartoPython } from "../../../src/commands/previewHtml";
@@ -676,6 +681,79 @@ describe("Rmd Notebooks Notebook Host", () => {
     const requests = extensionApi.takeTestPromptRequests();
     assert.ok(requests.some((request) => request.kind === "input" && request.prompt.includes("Package name?")));
     assert.ok(state.outputChannelText.includes("value=polars"));
+  });
+
+  it("runs built-in notebook commands with a different native Python controller", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "rmd-native-python-"));
+    try {
+      const base = requireTestPython();
+      execFileSync(base, ["-m", "venv", "--without-pip", directory]);
+      const executable = path.join(directory, process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+      const site = execFileSync(executable, ["-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], { encoding: "utf8" }).trim();
+      const parentSite = execFileSync(base, ["-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], { encoding: "utf8" }).trim();
+      await mkdir(site, { recursive: true });
+      await writeFile(path.join(site, "test-ipython.pth"), `${parentSite}\n`);
+      await writeFixture("python-native-controller.qmd", [
+        "```{python setup}", "native_marker = 42", "```", "",
+        "```{r mixed}", "cat('native mixed R ran\\n')", "```", "",
+        "```{python check}", "import sys", "print(sys.executable)",
+        "print('native_namespace_fresh', 'native_marker' not in globals())", "```", ""
+      ].join("\n"));
+      const editor = await openNotebookEditor("python-native-controller.qmd");
+      editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+      await vscode.commands.executeCommand("notebook.cell.execute");
+      await waitForDocumentState(editor.notebook.uri, (state) => state.outputs.some((record) => record.status === "success"));
+      await updateTestSetting("python.path", executable);
+      // Select through VS Code's native kernel command, not the test interpreter API.
+      const id = `rmd-python-${createHash("sha256").update(`configured:${executable}`).digest("hex").slice(0, 20)}`;
+      await sleep(200);
+      await vscode.commands.executeCommand("_notebook.selectKernel", { id, extension: "AlFontal.rmd-notebooks-vscode" });
+      await waitFor(() => extensionApi.getPythonEnvironmentState(editor.notebook.uri.toString()).selectedPath === executable ? true : undefined);
+      editor.selection = singleCellRange(findLastCodeCellIndex(editor.notebook));
+      await vscode.commands.executeCommand("notebook.cell.execute");
+      const state = await waitForDocumentState(editor.notebook.uri, (candidate) => candidate.outputs.filter((record) => record.status === "success").length === 2);
+      assert.ok(state.outputChannelText.includes(executable));
+      assert.ok(state.outputChannelText.includes("native_namespace_fresh True"));
+      await vscode.commands.executeCommand("notebook.execute");
+      await waitForDocumentState(editor.notebook.uri, (candidate) =>
+        candidate.outputs.filter((record) => record.status === "success").length === 3 &&
+        candidate.outputChannelText.includes("native_namespace_fresh False")
+      );
+      const uri = editor.notebook.uri;
+      const previousOrder = editor.notebook.cellAt(findLastCodeCellIndex(editor.notebook)).executionSummary?.executionOrder ?? 0;
+      await closeAllEditors();
+      const reopened = await vscode.workspace.openNotebookDocument(uri);
+      // VS Code may retain a hidden notebook document after its editor closes;
+      // that is still the same session, not an interpreter change or restart.
+      const retained = reopened === editor.notebook;
+      const reopenedEditor = await vscode.window.showNotebookDocument(reopened);
+      reopenedEditor.selection = singleCellRange(findLastCodeCellIndex(reopened));
+      await vscode.commands.executeCommand("notebook.cell.execute");
+      await waitFor(() => extensionApi.getPythonEnvironmentState(uri.toString()).selectedPath === executable ? true : undefined);
+      await waitFor(() => {
+        const cell = reopened.cellAt(findLastCodeCellIndex(reopened));
+        return cell.executionSummary?.executionOrder === (retained ? previousOrder + 1 : 1) &&
+          notebookOutputText(cell, "application/vnd.code.notebook.stdout").includes(`native_namespace_fresh ${retained ? "False" : "True"}`) ? true : undefined;
+      });
+    } finally {
+      await closeAllEditors();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers Python execution after the child process exits unexpectedly", async () => {
+    await writeFixture("python-process-death.qmd", [
+      "```{python crash}", "import os", "os._exit(17)", "```", "",
+      "```{python recover}", "print('recovered after process death')", "```", ""
+    ].join("\n"));
+    const editor = await openNotebookEditor("python-process-death.qmd");
+    editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    await waitForDocumentState(editor.notebook.uri, (state) => state.outputs.some((record) => record.status === "error"));
+    editor.selection = singleCellRange(findLastCodeCellIndex(editor.notebook));
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) => candidate.outputs.some((record) => record.status === "success"));
+    assert.ok(state.outputChannelText.includes("recovered after process death"));
   });
 
   it("restarts the per-document Python session", async () => {
@@ -2360,8 +2438,15 @@ function requireTestPython(): string {
 }
 
 async function resetIntegrationFixtures(): Promise<void> {
-  await writeFixture("integration.qmd", INTEGRATION_QMD);
-  await writeFixture("integration.rmd", INTEGRATION_RMD);
+  for (const [name, contents] of [["integration.qmd", INTEGRATION_QMD], ["integration.rmd", INTEGRATION_RMD]]) {
+    // Do not trigger external-file reloads of retained notebook models when the
+    // fixture already has the desired source. Those reloads can replace cells
+    // between showing an editor and dispatching its execution command.
+    const existing = await vscode.workspace.fs.readFile(getWorkspaceFileUri(name)).then(
+      (bytes) => Buffer.from(bytes).toString("utf8"), () => undefined
+    );
+    if (existing !== contents) await writeFixture(name, contents);
+  }
   await deleteWorkspaceFile(".Rprofile");
 }
 

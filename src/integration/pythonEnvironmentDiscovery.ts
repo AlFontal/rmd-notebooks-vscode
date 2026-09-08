@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { PythonEnvironment, PythonEnvironmentApi, PythonEnvironments } from "@vscode/python-environments";
 import { createEnvironmentRuntime, PythonLaunchDescriptor } from "../execution/pythonRuntimeTypes";
+import { withTimeout } from "../execution/asyncPreparation";
 
 export interface PythonRuntimeCatalogState {
   initialized: boolean;
@@ -17,6 +18,8 @@ export class PythonEnvironmentDiscovery implements vscode.Disposable {
   private runtimes: PythonLaunchDescriptor[] = [];
   private initializationPromise: Promise<void> | undefined;
   private refreshPromise: Promise<void> | undefined;
+  private disposed = false;
+  private refreshAgain = false;
   private state: PythonRuntimeCatalogState = {
     initialized: false,
     available: false,
@@ -27,12 +30,15 @@ export class PythonEnvironmentDiscovery implements vscode.Disposable {
 
   public ensureInitialized(): Promise<void> {
     if (!this.initializationPromise) {
-      this.initializationPromise = this.initializeOnce();
+      this.initializationPromise = this.initializeOnce().finally(() => {
+        if (!this.api) this.initializationPromise = undefined;
+      });
     }
     return this.initializationPromise;
   }
 
   public dispose(): void {
+    this.disposed = true;
     this.disposables.forEach((disposable) => disposable.dispose());
     this.changeEmitter.dispose();
   }
@@ -63,17 +69,26 @@ export class PythonEnvironmentDiscovery implements vscode.Disposable {
     if (!this.state.initialized) {
       return undefined;
     }
-    const environment = await this.api?.getEnvironment(resource);
+    const environment = await withTimeout(Promise.resolve(this.api?.getEnvironment(resource)));
     return environment ? environmentRuntimeId(environment) : undefined;
   }
 
   public async refresh(force = false): Promise<void> {
     await this.ensureInitialized();
-    if (!force && this.refreshPromise) {
+    if (this.refreshPromise) {
+      this.refreshAgain = true;
       return this.refreshPromise;
     }
     if (!this.refreshPromise) {
-      this.refreshPromise = this.performRefresh(force).finally(() => {
+      this.refreshPromise = (async () => {
+        await this.performRefresh(force);
+        // Provider change events during a scan require a fresh snapshot, not
+        // another forced scan (which would trigger the same events forever).
+        while (this.refreshAgain && !this.disposed) {
+          this.refreshAgain = false;
+          await this.performRefresh(false);
+        }
+      })().finally(() => {
         this.refreshPromise = undefined;
       });
     }
@@ -86,20 +101,29 @@ export class PythonEnvironmentDiscovery implements vscode.Disposable {
     if (!this.api || !environment) {
       return false;
     }
-    await this.api.managePackages(environment, { install: ["ipython"], showSkipOption: true });
-    return true;
+    await this.api.managePackages(environment, { install: ["ipython"], showSkipOption: false });
+    const packages = await withTimeout(this.api.getPackages(environment));
+    return packages?.some((pkg) => pkg.name.toLowerCase() === "ipython") ?? false;
+  }
+
+  public async getEnvironmentVariables(resource: vscode.Uri): Promise<Record<string, string | undefined> | undefined> {
+    return this.api ? withTimeout(this.api.getEnvironmentVariables(resource)) : undefined;
   }
 
   private async initializeOnce(): Promise<void> {
     try {
-      this.api = await PythonEnvironments.api();
+      const api = await withTimeout(PythonEnvironments.api());
+      if (this.disposed) return;
+      if (!api) throw new Error("Python Environments extension is unavailable. You can still enter a Python executable path.");
+      this.api = api;
       this.disposables.push(
-        this.api.onDidChangeEnvironments(() => void this.refresh(true)),
+        this.api.onDidChangeEnvironments(() => void this.refresh(false)),
         this.api.onDidChangeEnvironment(() => this.changeEmitter.fire())
       );
       this.state = { initialized: true, available: true, environments: 0 };
       await this.performRefresh(false);
     } catch (error) {
+      if (this.disposed) return;
       this.state = {
         initialized: true,
         available: false,
@@ -116,14 +140,17 @@ export class PythonEnvironmentDiscovery implements vscode.Disposable {
     }
     try {
       if (force) {
-        await this.api.refreshEnvironments(undefined);
+        await withTimeout(this.api.refreshEnvironments(undefined));
       }
-      const discovered = await this.api.getEnvironments("all");
-      const resolved = await Promise.all(
+      const discovered = await withTimeout(this.api.getEnvironments("all"));
+      const results = await Promise.allSettled(
         discovered.map(async (environment) =>
-          (await this.api?.resolveEnvironment(environment.environmentPath)) ?? environment
+          (await withTimeout(Promise.resolve(this.api?.resolveEnvironment(environment.environmentPath)), 4000)) ?? environment
         )
       );
+      if (this.disposed) return;
+      const resolved = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const failures = results.length - resolved.length;
       this.environmentByRuntimeId.clear();
       this.runtimes = resolved.flatMap((environment) => {
         const runtime = toRuntimeDescriptor(environment);
@@ -136,14 +163,16 @@ export class PythonEnvironmentDiscovery implements vscode.Disposable {
       this.state = {
         initialized: true,
         available: true,
-        environments: this.runtimes.length
+        environments: this.runtimes.length,
+        error: failures ? `${failures} Python environment(s) could not be resolved.` : undefined
       };
       this.changeEmitter.fire();
     } catch (error) {
+      if (this.disposed) return;
       this.state = {
         initialized: true,
         available: true,
-        environments: 0,
+        environments: this.runtimes.length,
         error: error instanceof Error ? error.message : String(error)
       };
       this.changeEmitter.fire();
