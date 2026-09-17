@@ -176,7 +176,7 @@ export class EditorController implements vscode.Disposable {
       outputs.set(chunk.identity.chunkId, unsupportedRecord);
       await this.outputStore.saveDocumentOutputs(document.uri.toString(), outputs);
       this.renderDocument(document.uri, snapshot, outputs);
-      this.outputChannelController.logRunCompleted(document, chunk, unsupportedRecord);
+      this.outputChannelController.logRunCompleted(document, chunk, unsupportedRecord, "editor");
       return;
     }
 
@@ -184,7 +184,7 @@ export class EditorController implements vscode.Disposable {
     outputs.set(chunk.identity.chunkId, runningRecord);
     await this.outputStore.saveDocumentOutputs(document.uri.toString(), outputs);
     this.renderDocument(document.uri, snapshot, outputs);
-    this.outputChannelController.logRunStarted(document, chunk);
+    this.outputChannelController.logRunStarted(document, chunk, "editor");
 
     try {
       const result = await executor.executeChunk({
@@ -199,7 +199,7 @@ export class EditorController implements vscode.Disposable {
 
       const record = createRecordFromResult(chunk, result);
       outputs.set(chunk.identity.chunkId, record);
-      this.outputChannelController.logRunCompleted(document, chunk, record);
+      this.outputChannelController.logRunCompleted(document, chunk, record, "editor");
     } catch (error) {
       const record = error instanceof CancelledExecutionError
         ? createRecord(chunk, "cancelled", [])
@@ -213,7 +213,7 @@ export class EditorController implements vscode.Disposable {
         chunk.identity.chunkId,
         record
       );
-      this.outputChannelController.logRunCompleted(document, chunk, record);
+      this.outputChannelController.logRunCompleted(document, chunk, record, "editor");
     }
 
     await this.outputStore.saveDocumentOutputs(document.uri.toString(), outputs);

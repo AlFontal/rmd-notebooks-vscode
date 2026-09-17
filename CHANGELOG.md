@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2
+
+- keep ordinary notebook errors inline without automatically opening the Output panel or showing a redundant error message
+- keep the selected cell language consistent with execution, chunk headers, saved source, and output validity, clearing results produced by the previous language
+- read Quarto `#|` options and labels from the current source so deleted metadata does not remain active
+- remove redundant language-only chunk badges while retaining useful metadata summaries and improve the local visual development launcher
+
 ## 0.6.1
 
 - expose Python environments in the native notebook kernel picker while retaining R execution in mixed-language notebooks

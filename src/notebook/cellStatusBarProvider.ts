@@ -51,11 +51,15 @@ export class InlineChunksCellStatusBarProvider implements vscode.NotebookCellSta
     // a refresh here when the snapshot updates — that would re-introduce the
     // dirty-on-open regression this PR fixed (#5).
     const chunkId = this.chunkIdLookup.getChunkIdForCell(cell.notebook.uri.toString(), cell.index);
+    const badge = formatChunkHeaderBadge(metadata, cell.document.getText());
+    if (!badge) {
+      return undefined;
+    }
     const headerItem = new vscode.NotebookCellStatusBarItem(
-      `$(code) ${formatChunkHeaderBadge(metadata)}`,
+      `$(code) ${badge}`,
       vscode.NotebookCellStatusBarAlignment.Left
     );
-    headerItem.tooltip = formatChunkHeaderTooltip(metadata);
+    headerItem.tooltip = formatChunkHeaderTooltip(metadata, cell.document.getText());
     headerItem.priority = 200;
     headerItem.command = {
       title: "Edit Chunk Header",

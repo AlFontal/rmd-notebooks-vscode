@@ -2,7 +2,21 @@ import { strict as assert } from "node:assert";
 import { formatChunkHeaderBadge, formatChunkHeaderTooltip } from "../../../src/notebook/metadataDisplay";
 
 describe("metadataDisplay", () => {
-  it("formats the raw chunk header info as a badge", () => {
+  it("omits a redundant language-only badge", () => {
+    assert.equal(
+      formatChunkHeaderBadge({
+        kind: "code",
+        header: "```{python}",
+        headerInfo: "python",
+        language: "python",
+        fenceLength: 3,
+        isClosed: true
+      }),
+      undefined
+    );
+  });
+
+  it("formats header and current body metadata without the language", () => {
     assert.equal(
       formatChunkHeaderBadge({
         kind: "code",
@@ -12,8 +26,8 @@ describe("metadataDisplay", () => {
         label: "first",
         fenceLength: 3,
         isClosed: true
-      }),
-      "{r first, echo=FALSE}"
+      }, "#| label: body-label\n#| include: false\n1 + 1"),
+      "first, echo=FALSE | body-label | include=false"
     );
   });
 
@@ -27,8 +41,8 @@ describe("metadataDisplay", () => {
         label: "first",
         fenceLength: 3,
         isClosed: true
-      }),
-      "Chunk header: ```{r first, echo=FALSE}\n\nLabel: `first`\n\nLanguage: `r`"
+      }, "#| warning: false\n1 + 1"),
+      "Chunk header: ```{r first, echo=FALSE}\n\nLabel: `first`\n\nLanguage: `r`\n\nCell options: warning=false"
     );
   });
 });
