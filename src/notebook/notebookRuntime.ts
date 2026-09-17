@@ -32,7 +32,14 @@ import {
   withInlineChunksMetadata
 } from "./notebookTypes";
 import { applyChunkOptionsToResult, parseChunkOptions, parseQuartoCellOptions } from "./chunkOptions";
-import { buildChunkHeader, extractChunkLabel, normalizeChunkHeaderInfo, validateChunkHeaderInfo } from "./chunkHeader";
+import {
+  areEquivalentChunkLanguages,
+  buildChunkHeader,
+  canonicalizeChunkHeader,
+  extractChunkLabel,
+  normalizeChunkHeaderInfo,
+  validateChunkHeaderInfo
+} from "./chunkHeader";
 import { parseJupyterFrontmatter } from "./frontmatter";
 import { buildInlineRExecutionCode, parseInlineRExpressions } from "./inlineR";
 
@@ -820,6 +827,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       void this.pythonDiscovery.ensureInitialized();
     }
 
+    await this.clearOutputsForLanguageChanges(notebook, this.snapshots.get(documentUri));
+
     const clearedCells = event.cellChanges
       .filter((change) => change.outputs !== undefined && change.outputs.length === 0)
       .map((change) => change.cell);
@@ -866,6 +875,51 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     )) {
       this.scheduleInlineOutputRestore(notebook);
     }
+  }
+
+  private async clearOutputsForLanguageChanges(
+    notebook: vscode.NotebookDocument,
+    previousSnapshot: NotebookSnapshot | undefined
+  ): Promise<void> {
+    if (!previousSnapshot) {
+      return;
+    }
+
+    const changedEntries = previousSnapshot.chunks.filter((entry) =>
+      entry.sourceKind === "chunk" &&
+      entry.index < notebook.cellCount &&
+      !areEquivalentChunkLanguages(entry.chunk.language, notebook.cellAt(entry.index).document.languageId)
+    );
+    if (changedEntries.length === 0) {
+      return;
+    }
+
+    await this.withOutputSync(notebook.uri.toString(), async () => {
+      const outputs = await this.ensureOutputsLoaded(notebook.uri.toString());
+      let deletedPersistedOutput = false;
+      for (const entry of changedEntries) {
+        deletedPersistedOutput = outputs.delete(entry.chunk.identity.chunkId) || deletedPersistedOutput;
+      }
+      if (deletedPersistedOutput) {
+        await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
+      }
+
+      if ((this.preparingExecutions.get(notebook.uri.toString())?.size ?? 0) > 0) {
+        return;
+      }
+
+      const selectedController = await this.ensureControllerSelected(notebook);
+      if (!selectedController) {
+        return;
+      }
+
+      for (const entry of changedEntries) {
+        const execution = selectedController.createNotebookCellExecution(notebook.cellAt(entry.index));
+        execution.start(Date.now());
+        await execution.clearOutput();
+        execution.end(undefined, Date.now());
+      }
+    });
   }
 
   private async handleNotebookClosed(notebook: vscode.NotebookDocument): Promise<void> {
@@ -1055,6 +1109,14 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       // dequeue), not from filteredResult.startedAt.
       beginExecutionDisplay(displayedResult.startedAt);
       const record = createRecordFromResult(entry.chunk, displayedResult, entry.sourceKind);
+      if (entry.sourceKind === "chunk" && hasCellLanguageChanged(notebook, entry.index, entry.chunk.language)) {
+        outputs.delete(entry.chunk.identity.chunkId);
+        await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
+        await this.withOutputSync(notebook.uri.toString(), async () => execution.clearOutput());
+        endExecution(undefined, displayedResult.finishedAt);
+        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record, "notebook");
+        return "completed";
+      }
       outputs.set(entry.chunk.identity.chunkId, record);
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
       await this.withOutputSync(notebook.uri.toString(), async () => {
@@ -1073,6 +1135,24 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         void this.handleMissingIPython(notebook.uri.toString()).catch((installError) => {
           this.outputChannelController.logDiagnostic(String(installError));
         });
+      }
+      if (entry.sourceKind === "chunk" && hasCellLanguageChanged(notebook, entry.index, entry.chunk.language)) {
+        beginExecutionDisplay(Date.now());
+        const record = createRecord(
+          entry.chunk,
+          error instanceof CancelledExecutionError ? "cancelled" : "error",
+          error instanceof CancelledExecutionError ? [] : [{
+            type: "error",
+            text: error instanceof Error ? error.message : String(error)
+          }],
+          entry.sourceKind
+        );
+        outputs.delete(entry.chunk.identity.chunkId);
+        await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
+        await this.withOutputSync(notebook.uri.toString(), async () => execution.clearOutput());
+        endExecution(undefined, Date.now());
+        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record, "notebook");
+        return "completed";
       }
       if (error instanceof InteractiveExecutionError) {
         // The chunk did start running (it timed out mid-execution), so the cell is
@@ -1285,11 +1365,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
       const targetSource: InlineChunksCodeCellMetadata = {
         kind: "code",
-        header: existing?.kind === "code" ? existing.header : entry.chunk.header,
-        headerInfo: existing?.kind === "code" ? existing.headerInfo : entry.chunk.headerInfo,
+        header: entry.chunk.header,
+        headerInfo: entry.chunk.headerInfo,
         language: entry.chunk.language,
         label: entry.chunk.label,
-        options: existing?.kind === "code" ? existing.options : parseChunkOptions(entry.chunk.headerInfo),
+        options: parseChunkOptions(entry.chunk.headerInfo),
         fenceLength: existing?.kind === "code" ? existing.fenceLength : entry.chunk.fenceLength,
         isClosed: existing?.kind === "code" ? existing.isClosed : entry.chunk.isClosed
       };
@@ -1631,9 +1711,13 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
 function getChunkOptions(cell: vscode.NotebookCell): InlineChunksCodeCellMetadata["options"] {
   const metadata = getInlineChunksMetadata(cell.metadata);
-  const headerOptions = metadata?.kind === "code" ? metadata.options : undefined;
+  const headerInfo = canonicalizeChunkHeader(
+    cell.document.languageId,
+    metadata?.kind === "code" ? metadata : {}
+  ).headerInfo;
+  const headerOptions = parseChunkOptions(headerInfo);
   const quartoOptions = parseQuartoCellOptions(cell.document.getText());
-  return { ...(headerOptions ?? {}), ...quartoOptions };
+  return { ...headerOptions, ...quartoOptions };
 }
 
 function getNotebookJupyterKernel(notebook: vscode.NotebookDocument): string | undefined {
@@ -1798,7 +1882,10 @@ function toParsedChunk(notebook: vscode.NotebookDocument, cell: vscode.NotebookC
   const metadata = getInlineChunksMetadata(cell.metadata);
   const isInline = metadata?.kind === "inline";
   const codeMetadata = metadata?.kind === "code" ? metadata : undefined;
-  const header = isInline ? "inline-r" : codeMetadata?.header ?? `\`\`\`{${cell.document.languageId}}`;
+  const canonicalHeader = isInline
+    ? { language: "r", header: "inline-r", headerInfo: "r inline" }
+    : canonicalizeChunkHeader(cell.document.languageId, codeMetadata ?? {});
+  const header = canonicalHeader.header;
   const body = cell.document.getText();
   const startLine = cell.index * 2;
   const bodyLineCount = body.length === 0 ? 0 : body.replace(/\r\n/g, "\n").split("\n").length;
@@ -1806,10 +1893,10 @@ function toParsedChunk(notebook: vscode.NotebookDocument, cell: vscode.NotebookC
 
   return {
     documentUri: notebook.uri.toString(),
-    language: isInline ? "r" : cell.document.languageId,
+    language: canonicalHeader.language,
     header,
-    headerInfo: isInline ? "r inline" : codeMetadata?.headerInfo ?? cell.document.languageId,
-    label: codeMetadata?.label ?? parseQuartoCellOptions(body).label,
+    headerInfo: canonicalHeader.headerInfo,
+    label: extractChunkLabel(canonicalHeader.headerInfo) ?? parseQuartoCellOptions(body).label,
     body,
     isClosed: true,
     fenceLength: codeMetadata?.fenceLength ?? 3,
@@ -1834,6 +1921,13 @@ function toParsedChunk(notebook: vscode.NotebookDocument, cell: vscode.NotebookC
       endCharacter: 3
     }
   };
+}
+
+function hasCellLanguageChanged(notebook: vscode.NotebookDocument, cellIndex: number, executedLanguage: string): boolean {
+  return notebook.isClosed ||
+    cellIndex < 0 ||
+    cellIndex >= notebook.cellCount ||
+    !areEquivalentChunkLanguages(executedLanguage, notebook.cellAt(cellIndex).document.languageId);
 }
 
 function reconcileOutputs(snapshot: NotebookSnapshot, outputs: Map<string, ChunkOutputRecord>): void {

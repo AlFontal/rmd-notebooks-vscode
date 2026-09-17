@@ -1237,6 +1237,132 @@ describe("Rmd Notebooks Notebook Host", () => {
     );
   });
 
+  it("serializes the live cell language and clears output when the language changes", async () => {
+    await writeFixture(
+      "language-change.qmd",
+      [
+        "# Language change",
+        "",
+        "```{python analysis, echo=FALSE}",
+        "print('python result')",
+        "```",
+        "",
+        "````{r second, fig.cap=\"Before, during, after\", custom.option=some_function()}",
+        "1 + 1",
+        "````",
+        ""
+      ].join("\n")
+    );
+
+    let editor = await openNotebookEditor("language-change.qmd");
+    const codeCells = editor.notebook.getCells().filter(isExecutableChunkCell);
+    editor.selection = singleCellRange(codeCells[0].index);
+    await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    await waitForDocumentState(editor.notebook.uri, (state) =>
+      state.outputs.some((record) => record.status === "success")
+    );
+    await waitForNotebookOutput(codeCells[0], (cell) => cell.outputs.length > 0);
+
+    await vscode.languages.setTextDocumentLanguage(editor.notebook.cellAt(codeCells[0].index).document, "r");
+    await waitFor(() => {
+      const first = editor.notebook.cellAt(codeCells[0].index);
+      return first.document.languageId === "r" && first.outputs.length === 0
+        ? true
+        : undefined;
+    });
+    await vscode.languages.setTextDocumentLanguage(editor.notebook.cellAt(codeCells[1].index).document, "python");
+
+    await editor.notebook.save();
+    const saved = Buffer.from(await vscode.workspace.fs.readFile(editor.notebook.uri)).toString("utf8");
+    assert.ok(saved.includes("```{r analysis, echo=FALSE}"));
+    assert.ok(saved.includes('````{python second, fig.cap="Before, during, after", custom.option=some_function()}'));
+
+    const cleared = await extensionApi.getDocumentState(editor.notebook.uri.toString());
+    assert.equal(cleared.outputs.length, 0);
+
+    await closeAllEditors();
+    editor = await openNotebookEditor("language-change.qmd");
+    const reopenedFirst = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
+    assert.equal(reopenedFirst.document.languageId, "r");
+    assert.equal(reopenedFirst.outputs.length, 0);
+  });
+
+  it("does not attach a late result after the cell language changes", async () => {
+    await writeFixture(
+      "late-language-change.qmd",
+      [
+        "# Late language change",
+        "",
+        "```{python slow}",
+        "import time",
+        "time.sleep(1)",
+        "print('late python result')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("late-language-change.qmd");
+    const codeCellIndex = findFirstCodeCellIndex(editor.notebook);
+    editor.selection = singleCellRange(codeCellIndex);
+    const run = vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+    await waitForDocumentState(editor.notebook.uri, (state) =>
+      state.outputs.some((record) => record.status === "running")
+    );
+
+    await vscode.languages.setTextDocumentLanguage(editor.notebook.cellAt(codeCellIndex).document, "r");
+    await run;
+
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.length === 0 && candidate.outputChannelText.includes("late python result")
+    );
+    assert.equal(state.outputs.length, 0);
+    assert.equal(editor.notebook.cellAt(codeCellIndex).outputs.length, 0);
+  });
+
+  it("uses current Quarto options and labels after leading option lines are deleted", async () => {
+    await writeFixture(
+      "deleted-quarto-options.qmd",
+      [
+        "# Deleted options",
+        "",
+        "```{r}",
+        "#| eval: false",
+        "cat('eval option deleted\\n')",
+        "```",
+        "",
+        "```{r}",
+        "#| include: false",
+        "cat('include option deleted\\n')",
+        "```",
+        "",
+        "```{r}",
+        "#| label: transient-label",
+        "cat('label option deleted\\n')",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("deleted-quarto-options.qmd");
+    const cells = editor.notebook.getCells().filter(isExecutableChunkCell);
+    const edit = new vscode.WorkspaceEdit();
+    for (const cell of cells) {
+      edit.delete(cell.document.uri, cell.document.lineAt(0).rangeIncludingLineBreak);
+    }
+    assert.equal(await vscode.workspace.applyEdit(edit), true);
+
+    await waitFor(() => cells.every((cell) => !cell.document.getText().startsWith("#|")) ? true : undefined);
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.length === 3 && candidate.outputs.every((record) => record.status === "success")
+    );
+
+    assert.ok(state.outputChannelText.includes("eval option deleted"));
+    assert.ok(state.outputChannelText.includes("include option deleted"));
+    assert.equal(editor.notebook.cellAt(cells[2].index).metadata?.rmdNotebooks?.label, undefined);
+  });
+
   it("does not mark the notebook dirty after opening an unedited file", async () => {
     await writeFixture(
       "clean-open.qmd",

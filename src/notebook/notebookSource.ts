@@ -2,6 +2,7 @@ import { TextDecoder, TextEncoder } from "node:util";
 import * as vscode from "vscode";
 import { parseExecutableChunks } from "../document/chunkParser";
 import { parseChunkOptions, parseQuartoCellOptions } from "./chunkOptions";
+import { canonicalizeChunkHeader } from "./chunkHeader";
 import { parseFrontmatter } from "./frontmatter";
 import { parseInlineRExpressions } from "./inlineR";
 import { getInlineChunksMetadata, withInlineChunksMetadata } from "./notebookTypes";
@@ -41,7 +42,7 @@ export function deserializeNotebookSource(content: Uint8Array): vscode.NotebookD
       headerInfo: chunk.headerInfo,
       language: chunk.language,
       label: chunk.label ?? quartoOptions.label,
-      options: { ...parseChunkOptions(chunk.headerInfo), ...quartoOptions },
+      options: parseChunkOptions(chunk.headerInfo),
       fenceLength: chunk.fenceLength,
       isClosed: chunk.isClosed
     });
@@ -128,17 +129,5 @@ function normalizeMarkupSource(value: string): string {
 }
 
 function buildHeader(languageId: string, metadata: ReturnType<typeof getInlineChunksMetadata>): string {
-  if (metadata?.kind === "code") {
-    if (metadata.language === languageId && metadata.header.trim().length > 0) {
-      return metadata.header;
-    }
-
-    if (metadata.headerInfo && metadata.headerInfo.trim().length > 0) {
-      return `\`\`\`{${metadata.headerInfo}}`;
-    }
-
-    return metadata.label ? `\`\`\`{${languageId} ${metadata.label}}` : `\`\`\`{${languageId}}`;
-  }
-
-  return `\`\`\`{${languageId}}`;
+  return canonicalizeChunkHeader(languageId, metadata?.kind === "code" ? metadata : {}).header;
 }

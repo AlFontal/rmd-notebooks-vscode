@@ -1,3 +1,16 @@
+export interface CanonicalChunkHeader {
+  language: string;
+  headerInfo: string;
+  header: string;
+}
+
+export interface ChunkHeaderSource {
+  header?: string;
+  headerInfo?: string;
+  fenceLength?: number;
+  label?: string;
+}
+
 export function normalizeChunkHeaderInfo(value: string): string {
   let trimmed = value.trim();
 
@@ -48,6 +61,44 @@ export function buildChunkHeader(headerInfo: string, fenceLength = 3): string {
   return `${"`".repeat(Math.max(3, fenceLength))}{${normalized}}`;
 }
 
+export function areEquivalentChunkLanguages(left: string, right: string): boolean {
+  const normalizedLeft = left.trim().toLowerCase();
+  const normalizedRight = right.trim().toLowerCase();
+  return normalizedLeft === normalizedRight ||
+    ([normalizedLeft, normalizedRight].every((language) => language === "python" || language === "py"));
+}
+
+export function canonicalizeChunkHeader(languageId: string, source: ChunkHeaderSource = {}): CanonicalChunkHeader {
+  const language = languageId.trim();
+  const fullHeaderMatch = source.header?.match(/^(\s*`{3,}\{\s*)([^\s,}]+)([^}]*\}\s*)$/);
+  if (fullHeaderMatch) {
+    const storedLanguage = fullHeaderMatch[2];
+    const headerLanguage = areEquivalentChunkLanguages(storedLanguage, language) ? storedLanguage : language;
+    const header = `${fullHeaderMatch[1]}${headerLanguage}${fullHeaderMatch[3]}`;
+    const headerInfo = header.match(/`{3,}\{([^}]*)\}/)?.[1].trim() ?? headerLanguage;
+    return { language, headerInfo, header };
+  }
+
+  const storedHeaderInfo = normalizeChunkHeaderInfo(source.headerInfo ?? "");
+  const storedLanguage = extractChunkLanguage(storedHeaderInfo);
+  if (storedLanguage) {
+    const headerLanguage = areEquivalentChunkLanguages(storedLanguage, language) ? storedLanguage : language;
+    const headerInfo = `${headerLanguage}${storedHeaderInfo.slice(storedLanguage.length)}`;
+    return {
+      language,
+      headerInfo,
+      header: buildChunkHeader(headerInfo, source.fenceLength)
+    };
+  }
+
+  const headerInfo = source.label ? `${language} ${source.label}` : language;
+  return {
+    language,
+    headerInfo,
+    header: buildChunkHeader(headerInfo, source.fenceLength)
+  };
+}
+
 export function validateChunkHeaderInfo(value: string, expectedLanguage: string): string | undefined {
   const normalized = normalizeChunkHeaderInfo(value);
   if (!normalized) {
@@ -63,7 +114,7 @@ export function validateChunkHeaderInfo(value: string, expectedLanguage: string)
     return "Chunk header must start with a language identifier.";
   }
 
-  if (language.toLowerCase() !== expectedLanguage.toLowerCase()) {
+  if (!areEquivalentChunkLanguages(language, expectedLanguage)) {
     return `Changing the chunk language is not supported yet. Keep \"${expectedLanguage}\".`;
   }
 
