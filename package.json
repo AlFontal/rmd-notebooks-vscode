@@ -283,7 +283,7 @@
             "never"
           ],
           "default": "errors",
-          "description": "When to reveal the Rmd Notebooks output panel after running a chunk."
+          "description": "When raw editor chunk execution automatically reveals the Rmd Notebooks output panel. Notebook cell errors remain inline."
         }
       }
     }

@@ -1016,14 +1016,14 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
           await execution.replaceOutput(await createNotebookOutputs(record));
         });
         endExecution(false, Date.now());
-        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
+        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record, "notebook");
         return "completed";
       }
 
       const runningRecord = createRecord(entry.chunk, "running", [], entry.sourceKind);
       outputs.set(entry.chunk.identity.chunkId, runningRecord);
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
-      this.outputChannelController.logRunStarted(cell.document, entry.chunk);
+      this.outputChannelController.logRunStarted(cell.document, entry.chunk, "notebook");
 
       const artifactDirectory = await this.outputStore.getArtifactDirectory(notebook.uri.toString());
       if (preparation.token.isCancellationRequested) throw new CancelledExecutionError();
@@ -1065,7 +1065,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         }
       });
       endExecution(displayedResult.success, displayedResult.finishedAt);
-      this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
+      this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record, "notebook");
       return "completed";
     } catch (error) {
       if (error instanceof MissingIPythonError) {
@@ -1089,12 +1089,12 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
             await execution.replaceOutput(await createNotebookOutputs(record));
           });
           endExecution(false, Date.now());
-          this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
+          this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record, "notebook");
           return "completed";
         }
         const fallback = await this.handleInteractiveFallback(notebook, cell, entry.chunk, outputs, execution, error.message);
         executionEnded = true;
-        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, fallback.record);
+        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, fallback.record, "notebook");
         return fallback.launchedTerminal ? "redirected" : "completed";
       }
 
@@ -1120,7 +1120,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
           }
         });
         endExecution(undefined, Date.now());
-        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, cancelledRecord);
+        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, cancelledRecord, "notebook");
         return "completed";
       }
 
@@ -1138,7 +1138,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         await execution.replaceOutput(await createNotebookOutputs(record));
       });
       endExecution(false, Date.now());
-      this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
+      this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record, "notebook");
       return "completed";
     } finally {
       preparing.delete(preparation);
