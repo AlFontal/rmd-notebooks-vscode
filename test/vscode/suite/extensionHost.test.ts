@@ -1101,6 +1101,36 @@ describe("Rmd Notebooks Notebook Host", () => {
     );
   });
 
+  for (const extension of ["qmd", "Rmd"]) {
+    it(`runs nested ${extension} R chunks from the document directory after workspace startup`, async () => {
+      await vscode.workspace.fs.createDirectory(getWorkspaceFileUri("reports"));
+      await vscode.workspace.fs.createDirectory(getWorkspaceFileUri("data"));
+      await writeFixture(".Rprofile", "rprofile_marker <- 41\n");
+      await writeFixture("data/file.csv", "value\n1\n");
+      await writeFixture(
+        `reports/analysis.${extension}`,
+        [
+          "# Nested document",
+          "",
+          "```{r paths}",
+          'cat(basename(getwd()), read.csv("../data/file.csv")$value, rprofile_marker, sep = "|")',
+          "```",
+          ""
+        ].join("\n")
+      );
+
+      const editor = await openNotebookEditor(`reports/analysis.${extension}`);
+      editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+      await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+
+      const codeCell = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
+      await waitForNotebookOutput(codeCell, (cell) =>
+        notebookOutputText(cell, "application/vnd.code.notebook.stdout").includes("reports|1|41")
+      );
+      assert.match(notebookOutputText(codeCell, "application/vnd.code.notebook.stdout"), /reports\|1\|41/);
+    });
+  }
+
   it("runs all qmd chunks and renders a plot inline", async () => {
     const editor = await openNotebookEditor("integration.qmd");
 

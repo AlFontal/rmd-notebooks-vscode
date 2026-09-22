@@ -92,7 +92,7 @@ export class RExecutor implements Executor {
     };
     const payload = await session.execute(
       context.code,
-      context.workspaceFolder,
+      context.workingDirectory ?? context.workspaceFolder,
       context.artifactDirectory,
       context.plot,
       dataFrame,
