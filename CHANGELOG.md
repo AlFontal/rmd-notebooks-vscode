@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3
+
+- run R chunks in `.Rmd` and `.qmd` notebooks from the source document directory while preserving workspace-root R startup for `.Rprofile` and renv (#31)
+
 ## 0.6.2
 
 - keep ordinary notebook errors inline without automatically opening the Output panel or showing a redundant error message
