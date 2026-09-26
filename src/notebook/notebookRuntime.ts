@@ -1036,16 +1036,37 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       executionEnded = true;
       execution.end(success, endTime);
     };
+    // Every outcome ends the same way: keep (or drop) the output record, show it in
+    // the cell (an empty record clears the cell), end the execution, and log it.
+    const settle = async (
+      record: ChunkOutputRecord,
+      success: boolean | undefined,
+      options: { endTime?: number; persist?: boolean; log?: boolean } = {}
+    ): Promise<ExecuteCellOutcome> => {
+      const persist = options.persist ?? true;
+      if (persist) {
+        outputs.set(entry.chunk.identity.chunkId, record);
+      } else {
+        outputs.delete(entry.chunk.identity.chunkId);
+      }
+      await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
+      await this.withOutputSync(notebook.uri.toString(), async () => {
+        if (!persist || record.outputs.length === 0) {
+          await execution.clearOutput();
+        } else {
+          await execution.replaceOutput(await createNotebookOutputs(record));
+        }
+      });
+      endExecution(success, options.endTime ?? Date.now());
+      if (options.log ?? true) {
+        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
+      }
+      return "completed";
+    };
     try {
       if (chunkOptions?.eval === false) {
         beginExecutionDisplay(Date.now());
-        const skippedRecord = createRecord(entry.chunk, "success", [], entry.sourceKind);
-        outputs.set(entry.chunk.identity.chunkId, skippedRecord);
-        await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
-        await this.withOutputSync(notebook.uri.toString(), async () => {
-          await execution.clearOutput();
-        });
-        endExecution(true, Date.now());
+        await settle(createRecord(entry.chunk, "success", [], entry.sourceKind), true, { log: false });
         void vscode.window.setStatusBarMessage(`Rmd Notebooks: skipped ${entry.chunk.label ?? "cell"} because eval=FALSE`, 2500);
         return "completed";
       }
@@ -1065,14 +1086,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
             text: `No executor registered for language "${entry.chunk.language}".`
           }
         ], entry.sourceKind);
-        outputs.set(entry.chunk.identity.chunkId, record);
-        await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
-        await this.withOutputSync(notebook.uri.toString(), async () => {
-          await execution.replaceOutput(await createNotebookOutputs(record));
-        });
-        endExecution(false, Date.now());
-        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
-        return "completed";
+        return await settle(record, false);
       }
 
       const runningRecord = createRecord(entry.chunk, "running", [], entry.sourceKind);
@@ -1111,25 +1125,9 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       beginExecutionDisplay(displayedResult.startedAt);
       const record = createRecordFromResult(entry.chunk, displayedResult, entry.sourceKind);
       if (entry.sourceKind === "chunk" && hasCellLanguageChanged(notebook, entry.index, entry.chunk.language)) {
-        outputs.delete(entry.chunk.identity.chunkId);
-        await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
-        await this.withOutputSync(notebook.uri.toString(), async () => execution.clearOutput());
-        endExecution(undefined, displayedResult.finishedAt);
-        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
-        return "completed";
+        return await settle(record, undefined, { endTime: displayedResult.finishedAt, persist: false });
       }
-      outputs.set(entry.chunk.identity.chunkId, record);
-      await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
-      await this.withOutputSync(notebook.uri.toString(), async () => {
-        if (record.outputs.length === 0) {
-          await execution.clearOutput();
-        } else {
-          await execution.replaceOutput(await createNotebookOutputs(record));
-        }
-      });
-      endExecution(displayedResult.success, displayedResult.finishedAt);
-      this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
-      return "completed";
+      return await settle(record, displayedResult.success, { endTime: displayedResult.finishedAt });
     } catch (error) {
       if (error instanceof MissingIPythonError) {
         // Do not leave the cell pending while the user considers installation.
@@ -1148,12 +1146,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
           }],
           entry.sourceKind
         );
-        outputs.delete(entry.chunk.identity.chunkId);
-        await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
-        await this.withOutputSync(notebook.uri.toString(), async () => execution.clearOutput());
-        endExecution(undefined, Date.now());
-        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
-        return "completed";
+        return await settle(record, undefined, { persist: false });
       }
       if (error instanceof InteractiveExecutionError) {
         // The chunk did start running (it timed out mid-execution), so the cell is
@@ -1164,14 +1157,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
             ...inlineSourceOutputItems(cell.document.getText()),
             { type: "error", text: error.message }
           ], "inline");
-          outputs.set(entry.chunk.identity.chunkId, record);
-          await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
-          await this.withOutputSync(notebook.uri.toString(), async () => {
-            await execution.replaceOutput(await createNotebookOutputs(record));
-          });
-          endExecution(false, Date.now());
-          this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
-          return "completed";
+          return await settle(record, false);
         }
         const fallback = await this.handleInteractiveFallback(notebook, cell, entry.chunk, outputs, execution, error.message);
         executionEnded = true;
@@ -1183,7 +1169,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         // The chunk was interrupted while still waiting in the queue, so it never
         // ran. End the still-pending execution without assigning a run order or a
         // duration (start() must be called before end(), but with no start time so
-        // no clock is shown), and clear it without flagging it as a failure.
+        // no clock is shown), and clear it without flagging it as a failure. Inline
+        // prose keeps showing its source.
         beginExecutionDisplay(undefined);
         const cancelledRecord = createRecord(
           entry.chunk,
@@ -1191,18 +1178,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
           isInline ? inlineSourceOutputItems(cell.document.getText()) : [],
           entry.sourceKind
         );
-        outputs.set(entry.chunk.identity.chunkId, cancelledRecord);
-        await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
-        await this.withOutputSync(notebook.uri.toString(), async () => {
-          if (isInline) {
-            await execution.replaceOutput(await createNotebookOutputs(cancelledRecord));
-          } else {
-            await execution.clearOutput();
-          }
-        });
-        endExecution(undefined, Date.now());
-        this.outputChannelController.logRunCompleted(cell.document, entry.chunk, cancelledRecord);
-        return "completed";
+        return await settle(cancelledRecord, undefined);
       }
 
       beginExecutionDisplay(Date.now());
@@ -1213,14 +1189,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
           text: error instanceof Error ? error.message : String(error)
         }
       ], entry.sourceKind);
-      outputs.set(entry.chunk.identity.chunkId, record);
-      await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
-      await this.withOutputSync(notebook.uri.toString(), async () => {
-        await execution.replaceOutput(await createNotebookOutputs(record));
-      });
-      endExecution(false, Date.now());
-      this.outputChannelController.logRunCompleted(cell.document, entry.chunk, record);
-      return "completed";
+      return await settle(record, false);
     } finally {
       preparing.delete(preparation);
       if (!preparing.size) this.preparingExecutions.delete(notebook.uri.toString());
@@ -1270,7 +1239,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     await this.terminalRunner.runChunk(
       resolved.cell.document.getText(),
-      vscode.workspace.getWorkspaceFolder(resolved.notebook.uri)?.uri.fsPath
+      vscode.workspace.getWorkspaceFolder(resolved.notebook.uri)?.uri.fsPath,
+      resolveExecutionDirectory(resolved.notebook)
     );
   }
 
@@ -1675,7 +1645,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
     let launchedTerminal = false;
     if (behavior === "terminal") {
-      await this.terminalRunner.runChunk(cell.document.getText(), workspaceFolder);
+      await this.terminalRunner.runChunk(cell.document.getText(), workspaceFolder, resolveExecutionDirectory(notebook));
       launchedTerminal = true;
     } else if (behavior === "prompt") {
       const choice = await vscode.window.showWarningMessage(
@@ -1684,7 +1654,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         "Run in R Terminal"
       );
       if (choice === "Run in R Terminal") {
-        await this.terminalRunner.runChunk(cell.document.getText(), workspaceFolder);
+        await this.terminalRunner.runChunk(cell.document.getText(), workspaceFolder, resolveExecutionDirectory(notebook));
         launchedTerminal = true;
       }
     }

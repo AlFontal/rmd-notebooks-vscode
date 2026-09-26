@@ -91,7 +91,7 @@ function formatOutputs(record: ChunkOutputRecord): string[] {
     }
 
     if (output.type === "stream") {
-      lines.push(`[${output.name}]`);
+      lines.push(`[${output.kind ?? output.name}]`);
       lines.push(output.text);
       continue;
     }

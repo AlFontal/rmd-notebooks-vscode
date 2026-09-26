@@ -65,6 +65,9 @@ export interface StreamOutputItem {
   type: "stream";
   name: "stderr";
   text: string;
+  // R conditions, so message=FALSE / warning=FALSE can drop them. Absent for
+  // other stderr output (e.g. Python's stderr stream or cat(file = stderr())).
+  kind?: "message" | "warning";
 }
 
 export interface ImageOutputItem {

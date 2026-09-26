@@ -171,6 +171,17 @@ rmd_notebooks_data_frame_to_html <- function(df, max_rows, max_columns) {
   )
 }
 
+# Formats a condition the way knitr does: "Warning in f(x): msg" or "Warning: msg".
+rmd_notebooks_format_condition <- function(prefix, condition) {
+  text <- sub("\n$", "", conditionMessage(condition))
+  call <- conditionCall(condition)
+  # Top-level stop()/warning() calls report the session's own eval() as their call.
+  if (is.null(call) || identical(call, quote(eval(expression, envir = user_env)))) {
+    return(sprintf("%s: %s", prefix, text))
+  }
+  sprintf("%s in %s: %s", prefix, paste(deparse(call, nlines = 1L), collapse = ""), text)
+}
+
 rmd_notebooks_collect_plot_paths <- function(directory, started_at) {
   pattern <- sprintf("^plot-%s-.*\\.png$", started_at)
   if (!dir.exists(directory)) {
@@ -434,6 +445,9 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
   stderr_buffer <- character()
   html_buffer <- character()
   markdown_buffer <- character()
+  message_buffer <- character()
+  warning_buffer <- character()
+  error_buffer <- character()
   stdout_connection <- textConnection("stdout_buffer", "w", local = TRUE)
   stderr_connection <- textConnection("stderr_buffer", "w", local = TRUE)
   assign("active_stdout_connection", stdout_connection, envir = protocol_env)
@@ -478,18 +492,18 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
         }
       }
     }, warning = function(warning_condition) {
-      message(conditionMessage(warning_condition))
+      warning_buffer <<- c(warning_buffer, rmd_notebooks_format_condition("Warning", warning_condition))
       invokeRestart("muffleWarning")
     }, message = function(message_condition) {
-      message(conditionMessage(message_condition))
+      message_buffer <<- c(message_buffer, sub("\n$", "", conditionMessage(message_condition)))
       invokeRestart("muffleMessage")
     })
   }, error = function(error_condition) {
     success <<- FALSE
-    message(conditionMessage(error_condition))
+    error_buffer <<- c(error_buffer, rmd_notebooks_format_condition("Error", error_condition))
   }, interrupt = function(interrupt_condition) {
     success <<- FALSE
-    message("Execution interrupted.")
+    error_buffer <<- c(error_buffer, "Execution interrupted.")
   })
 
   rmd_notebooks_update_vscode_r_workspace()
@@ -509,6 +523,9 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
     stderr = stderr_buffer,
     html = html_buffer,
     markdown = markdown_buffer,
+    messages = message_buffer,
+    warnings = warning_buffer,
+    errors = error_buffer,
     plots = rmd_notebooks_collect_plot_paths(artifact_directory, started_at)
   )
 }
@@ -604,6 +621,9 @@ repeat {
   rmd_notebooks_emit_section("STDERR", result$stderr)
   rmd_notebooks_emit_section("HTML", result$html)
   rmd_notebooks_emit_section("MARKDOWN", result$markdown)
+  rmd_notebooks_emit_section("MESSAGE", result$messages)
+  rmd_notebooks_emit_section("WARNING", result$warnings)
+  rmd_notebooks_emit_section("ERROR", result$errors)
   rmd_notebooks_emit_section("PLOTS", result$plots)
   cat("RMD_NOTEBOOKS_RESULT_END\n")
   flush.console()
