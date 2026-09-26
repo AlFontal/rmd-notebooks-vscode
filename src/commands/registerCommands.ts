@@ -92,6 +92,8 @@ async function persistNotebookSource(notebook: vscode.NotebookDocument): Promise
     return cellData;
   });
 
-  const serialized = serializeNotebookSource(new vscode.NotebookData(cells));
+  const data = new vscode.NotebookData(cells);
+  data.metadata = notebook.metadata;
+  const serialized = serializeNotebookSource(data);
   await vscode.workspace.fs.writeFile(notebook.uri, serialized);
 }

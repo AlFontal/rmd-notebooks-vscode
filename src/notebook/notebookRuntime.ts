@@ -41,6 +41,7 @@ import {
   validateChunkHeaderInfo
 } from "./chunkHeader";
 import { parseJupyterFrontmatter } from "./frontmatter";
+import { deriveCodeCellMetadata } from "./notebookSourceFormat";
 import { buildInlineRExecutionCode, parseInlineRExpressions } from "./inlineR";
 
 interface NotebookChunkCell {
@@ -1363,16 +1364,14 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         continue;
       }
 
-      const targetSource: InlineChunksCodeCellMetadata = {
-        kind: "code",
-        header: entry.chunk.header,
-        headerInfo: entry.chunk.headerInfo,
-        language: entry.chunk.language,
-        label: entry.chunk.label,
-        options: parseChunkOptions(entry.chunk.headerInfo),
-        fenceLength: existing?.kind === "code" ? existing.fenceLength : entry.chunk.fenceLength,
-        isClosed: existing?.kind === "code" ? existing.isClosed : entry.chunk.isClosed
-      };
+      const existingCode = existing?.kind === "code" ? existing : undefined;
+      const targetSource = deriveCodeCellMetadata(
+        entry.cell.document.languageId,
+        existingCode ?? {},
+        entry.chunk.body,
+        existingCode?.fenceLength ?? entry.chunk.fenceLength,
+        existingCode?.isClosed ?? entry.chunk.isClosed
+      );
 
       if (existing && JSON.stringify(existing) === JSON.stringify(targetSource)) {
         continue;
@@ -1506,7 +1505,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       if (expressions.length === 0) {
         continue;
       }
-      const replacement = createInlineCellData(cell.document.getText(), expressions.length);
+      const replacement = createInlineCellData(cell.document.getText(), expressions.length, cell.metadata);
       edits.push(vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(cell.index, cell.index + 1), [replacement]));
     }
 
@@ -2066,9 +2065,14 @@ function createInlineSourceOutputs(source: string): vscode.NotebookCellOutput[] 
   return [new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(source, "text/markdown")])];
 }
 
-function createInlineCellData(source: string, expressionCount: number): vscode.NotebookCellData {
+function createInlineCellData(
+  source: string,
+  expressionCount: number,
+  metadata?: { [key: string]: any }
+): vscode.NotebookCellData {
   const cell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, source, "markdown");
-  cell.metadata = withInlineChunksMetadata(cell.metadata, { kind: "inline", expressionCount });
+  // Keep the promoted cell's other metadata (notably its source layout).
+  cell.metadata = withInlineChunksMetadata(metadata, { kind: "inline", expressionCount });
   cell.outputs = createInlineSourceOutputs(source);
   return cell;
 }

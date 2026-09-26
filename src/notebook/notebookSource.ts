@@ -1,133 +1,36 @@
 import { TextDecoder, TextEncoder } from "node:util";
 import * as vscode from "vscode";
-import { parseExecutableChunks } from "../document/chunkParser";
-import { parseChunkOptions, parseQuartoCellOptions } from "./chunkOptions";
-import { canonicalizeChunkHeader } from "./chunkHeader";
-import { parseFrontmatter } from "./frontmatter";
-import { parseInlineRExpressions } from "./inlineR";
-import { getInlineChunksMetadata, withInlineChunksMetadata } from "./notebookTypes";
+import { parseNotebookSource, renderNotebookSource, SourceCell } from "./notebookSourceFormat";
+import { getInlineChunksDocumentLayout, getInlineChunksMetadata } from "./notebookTypes";
 
 const DECODER = new TextDecoder();
 const ENCODER = new TextEncoder();
 
 export function deserializeNotebookSource(content: Uint8Array): vscode.NotebookData {
-  const source = DECODER.decode(content);
-  const normalized = source.replace(/\r\n/g, "\n");
-  const lines = normalized.length === 0 ? [] : normalized.split("\n");
-  const chunks = parseExecutableChunks("", normalized);
-  const cells: vscode.NotebookCellData[] = [];
-  const frontmatter = parseFrontmatter(normalized);
-  let cursor = 0;
+  const parsed = parseNotebookSource(DECODER.decode(content));
+  const cells = parsed.cells.map((sourceCell) => {
+    const kind = sourceCell.kind === "code" ? vscode.NotebookCellKind.Code : vscode.NotebookCellKind.Markup;
+    const cell = new vscode.NotebookCellData(kind, sourceCell.value, sourceCell.languageId);
+    cell.metadata = sourceCell.metadata;
+    if (getInlineChunksMetadata(sourceCell.metadata)?.kind === "inline") {
+      cell.outputs = [
+        new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(sourceCell.value, "text/markdown")])
+      ];
+    }
+    return cell;
+  });
 
-  if (frontmatter) {
-    const frontmatterCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, frontmatter.body, "yaml");
-    frontmatterCell.metadata = withInlineChunksMetadata(frontmatterCell.metadata, {
-      kind: "frontmatter",
-      openingFence: frontmatter.openingFence,
-      closingFence: frontmatter.closingFence
-    });
-    cells.push(frontmatterCell);
-    cursor = frontmatter.endLine + 1;
-  }
-
-  for (const chunk of chunks) {
-    const before = lines.slice(cursor, chunk.startLine).join("\n");
-    pushMarkupCell(cells, before);
-
-    const codeCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, chunk.body, chunk.language);
-    const quartoOptions = parseQuartoCellOptions(chunk.body);
-    codeCell.metadata = withInlineChunksMetadata(codeCell.metadata, {
-      kind: "code",
-      header: chunk.header,
-      headerInfo: chunk.headerInfo,
-      language: chunk.language,
-      label: chunk.label ?? quartoOptions.label,
-      options: parseChunkOptions(chunk.headerInfo),
-      fenceLength: chunk.fenceLength,
-      isClosed: chunk.isClosed
-    });
-    cells.push(codeCell);
-    cursor = chunk.isClosed ? chunk.endLine + 1 : lines.length;
-  }
-
-  pushMarkupCell(cells, lines.slice(cursor).join("\n"));
-
-  if (cells.length === 0) {
-    cells.push(new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, normalized, "markdown"));
-  }
-
-  return new vscode.NotebookData(cells);
+  const data = new vscode.NotebookData(cells);
+  data.metadata = { rmdNotebooksLayout: parsed.layout };
+  return data;
 }
 
 export function serializeNotebookSource(data: vscode.NotebookData): Uint8Array {
-  const blocks: string[] = [];
-
-  for (const cell of data.cells) {
-    const metadata = getInlineChunksMetadata(cell.metadata ?? {});
-    if (metadata?.kind === "frontmatter") {
-      const body = normalizeMarkupSource(cell.value);
-      blocks.push(
-        body.length > 0
-          ? `${metadata.openingFence}\n${body}\n${metadata.closingFence}`
-          : `${metadata.openingFence}\n${metadata.closingFence}`
-      );
-      continue;
-    }
-
-    if (metadata?.kind === "inline") {
-      const markup = normalizeMarkupSource(cell.value);
-      if (markup.length > 0) {
-        blocks.push(markup);
-      }
-      continue;
-    }
-
-    if (cell.kind === vscode.NotebookCellKind.Markup) {
-      const markup = normalizeMarkupSource(cell.value);
-      if (markup.length > 0) {
-        blocks.push(markup);
-      }
-      continue;
-    }
-
-    const header = buildHeader(cell.languageId, metadata);
-    const closingFence = "`".repeat(Math.max(3, metadata?.kind === "code" ? metadata.fenceLength : 3));
-    const body = cell.value.replace(/\r\n/g, "\n").replace(/\n+$/g, "");
-    const codeBlock = body.length > 0 ? `${header}\n${body}\n${closingFence}` : `${header}\n${closingFence}`;
-    blocks.push(codeBlock);
-  }
-
-  return ENCODER.encode(blocks.join("\n\n"));
-}
-
-function pushMarkupCell(cells: vscode.NotebookCellData[], value: string): void {
-  if (value.trim().length === 0) {
-    return;
-  }
-
-  const inlineExpressions = parseInlineRExpressions(value);
-  if (inlineExpressions.length > 0) {
-    const inlineCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, value, "markdown");
-    inlineCell.metadata = withInlineChunksMetadata(inlineCell.metadata, {
-      kind: "inline",
-      expressionCount: inlineExpressions.length
-    });
-    inlineCell.outputs = [
-      new vscode.NotebookCellOutput([vscode.NotebookCellOutputItem.text(value, "text/markdown")])
-    ];
-    cells.push(inlineCell);
-    return;
-  }
-
-  const markupCell = new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, value, "markdown");
-  markupCell.metadata = withInlineChunksMetadata(markupCell.metadata, { kind: "markup" });
-  cells.push(markupCell);
-}
-
-function normalizeMarkupSource(value: string): string {
-  return value.replace(/\r\n/g, "\n").replace(/\n+$/g, "");
-}
-
-function buildHeader(languageId: string, metadata: ReturnType<typeof getInlineChunksMetadata>): string {
-  return canonicalizeChunkHeader(languageId, metadata?.kind === "code" ? metadata : {}).header;
+  const cells: SourceCell[] = data.cells.map((cell) => ({
+    kind: cell.kind === vscode.NotebookCellKind.Markup ? "markup" : "code",
+    value: cell.value,
+    languageId: cell.languageId,
+    metadata: cell.metadata ?? {}
+  }));
+  return ENCODER.encode(renderNotebookSource(cells, getInlineChunksDocumentLayout(data.metadata)));
 }
