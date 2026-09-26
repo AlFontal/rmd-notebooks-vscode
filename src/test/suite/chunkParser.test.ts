@@ -31,6 +31,14 @@ describe("chunkParser", () => {
     );
   });
 
+  it("extracts a label written after a comma", () => {
+    const chunks = parseExecutableChunks("file:///comma.Rmd", "```{r, setup}\n1\n```\n```{R setup, echo=FALSE}\n2\n```\n");
+    assert.deepEqual(
+      chunks.map((chunk) => [chunk.language, chunk.label]),
+      [["r", "setup"], ["r", "setup"]]
+    );
+  });
+
   it("tolerates malformed fences without throwing", () => {
     const source = readFixture("malformed.Rmd");
     const chunks = parseExecutableChunks("file:///malformed.Rmd", source);

@@ -1,4 +1,5 @@
 import { ExecutionResult } from "../execution/executorTypes";
+import { extractChunkLabel, extractChunkLanguage, normalizeChunkHeaderInfo } from "./chunkHeader";
 
 export interface ChunkOptions {
   label?: string;
@@ -141,27 +142,19 @@ export function applyChunkOptionsToResult(result: ExecutionResult, options: Chun
 }
 
 function getOptionSegment(headerInfo: string): string {
-  const trimmed = headerInfo.trim();
-  if (!trimmed) {
+  const normalized = normalizeChunkHeaderInfo(headerInfo);
+  const language = extractChunkLanguage(normalized);
+  if (!language) {
     return "";
   }
 
-  const firstSeparator = trimmed.search(/[\s,]/);
-  if (firstSeparator === -1) {
-    return "";
-  }
+  const remainder = stripLeadingToken(normalized, language);
+  const label = extractChunkLabel(normalized);
+  return label ? stripLeadingToken(remainder, label) : remainder;
+}
 
-  const remainder = trimmed.slice(firstSeparator).trim();
-  if (!remainder) {
-    return "";
-  }
-
-  const labelCandidate = remainder.split(",")[0]?.trim() ?? "";
-  if (labelCandidate && !labelCandidate.includes("=")) {
-    return remainder.slice(labelCandidate.length).replace(/^,/, "").trim();
-  }
-
-  return remainder.replace(/^,/, "").trim();
+function stripLeadingToken(value: string, token: string): string {
+  return value.slice(token.length).trim().replace(/^,/, "").trim();
 }
 
 function splitOptionTokens(value: string): string[] {

@@ -1,3 +1,4 @@
+import { extractChunkLabel, extractChunkLanguage } from "../notebook/chunkHeader";
 import { ParsedExecutableChunk } from "./chunkTypes";
 
 const OPEN_FENCE_PATTERN = /^(\s*)(`{3,})\{([^}]*)\}\s*$/;
@@ -95,18 +96,10 @@ function findClosingFence(lines: string[], startIndex: number, minimumFenceLengt
 }
 
 function parseHeaderInfo(headerInfo: string): { language: string; label?: string } {
-  const trimmed = headerInfo.trim();
-  if (!trimmed) {
-    return { language: "" };
-  }
-
-  const firstSeparator = trimmed.search(/[\s,]/);
-  const language = (firstSeparator === -1 ? trimmed : trimmed.slice(0, firstSeparator)).trim().toLowerCase();
-  const remainder = firstSeparator === -1 ? "" : trimmed.slice(firstSeparator).trim();
-  const rawLabel = remainder.split(",")[0]?.trim();
-  const label = rawLabel && !rawLabel.includes("=") ? rawLabel : undefined;
-
-  return { language, label };
+  return {
+    language: extractChunkLanguage(headerInfo)?.toLowerCase() ?? "",
+    label: extractChunkLabel(headerInfo)
+  };
 }
 
 function getLineLength(lines: string[], lineNumber: number): number {

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- save `.Rmd` and `.qmd` notebooks without rewriting untouched source: blank lines between blocks, the final newline, CRLF line endings, and blank lines inside chunk bodies and front matter are preserved instead of growing or being dropped on every save (#33)
+- read chunk labels written after a comma (`{r, setup}`) consistently, so such notebooks no longer open as modified (#35)
+
 ## 0.6.3
 
 - run R chunks in `.Rmd` and `.qmd` notebooks from the source document directory while preserving workspace-root R startup for `.Rprofile` and renv (#31)

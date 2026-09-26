@@ -24,6 +24,11 @@ describe("chunkOptions", () => {
     );
   });
 
+  it("ignores a label written after a comma", () => {
+    assert.deepEqual(parseChunkOptions("r, setup, include=FALSE"), { include: false });
+    assert.deepEqual(parseChunkOptions("r, echo=FALSE"), { echo: false });
+  });
+
   it("returns an empty object when no options are present", () => {
     assert.deepEqual(parseChunkOptions("r"), {});
   });

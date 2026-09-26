@@ -1424,6 +1424,64 @@ describe("Rmd Notebooks Notebook Host", () => {
     );
   });
 
+  it("does not mark the notebook dirty after opening comma-labelled chunks", async () => {
+    await writeFixture(
+      "clean-open-comma.Rmd",
+      ["```{r, setup}", "x <- 1", "```", "", "```{r, echo=FALSE}", "y <- 2", "```", ""].join("\n")
+    );
+
+    const editor = await openNotebookEditor("clean-open-comma.Rmd");
+    await waitForDocumentState(
+      editor.notebook.uri,
+      (state) => (state.snapshot?.chunkIds.length ?? 0) >= 2
+    );
+
+    assert.equal(editor.notebook.isDirty, false, "Opening an unedited notebook should not mark it dirty.");
+    assert.equal(editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook)).metadata?.rmdNotebooks?.label, "setup");
+  });
+
+  it("saves only the edited text and keeps the source layout across save cycles", async () => {
+    const lines = [
+      "---",
+      "title: Layout",
+      "---",
+      "",
+      "Intro",
+      "```{r first}",
+      "x <- 1",
+      "",
+      "```",
+      "",
+      "",
+      "Doc:",
+      "",
+      "````markdown",
+      "```{r}",
+      "shown <- TRUE",
+      "```",
+      "````",
+      ""
+    ];
+    for (const [name, eol] of [["layout-lf.Rmd", "\n"], ["layout-crlf.Rmd", "\r\n"]] as const) {
+      await writeFixture(name, lines.join(eol));
+
+      for (let cycle = 0; cycle < 2; cycle += 1) {
+        const editor = await openNotebookEditor(name);
+        const cell = editor.notebook.cellAt(findFirstCodeCellIndex(editor.notebook));
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(cell.document.uri, cell.document.lineAt(0).range, `x <- ${cycle + 2}`);
+        assert.equal(await vscode.workspace.applyEdit(edit), true);
+        await waitFor(() => (cell.document.getText().startsWith(`x <- ${cycle + 2}`) ? true : undefined));
+        assert.ok(await editor.notebook.save(), "Notebook save should succeed.");
+
+        const saved = Buffer.from(await vscode.workspace.fs.readFile(editor.notebook.uri)).toString("utf8");
+        const expected = lines.map((line) => (line === "x <- 1" ? `x <- ${cycle + 2}` : line)).join(eol);
+        assert.equal(saved, expected, `Save cycle ${cycle + 1} of ${name} changed the layout.`);
+        await closeAllEditors();
+      }
+    }
+  });
+
   it("skips execution for eval=FALSE", async () => {
     await writeFixture(
       "eval-false.qmd",
