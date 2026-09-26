@@ -11,6 +11,7 @@
 - run chunks sent to the R terminal from the document directory, matching inline execution
 - show R output in the order it was produced: text, messages, warnings, errors, rich output and plots are interleaved instead of grouped by type, with one plot per page
 - stop R output that already contains `%XX` sequences from being altered, and stop plot file names from using scientific notation
+- keep sparse R plots (a few points or a single line) on Linux, where a file-size check wrongly discarded them as blank pages
 - only persist stored outputs when they change instead of on every edit
 - delete plot files that no output references when a notebook opens or closes and on Clear All Outputs, and keep each document's plot files in its own folder
 - restore the remaining outputs when a stored plot file is missing, showing a note in place of the plot

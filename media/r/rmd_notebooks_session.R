@@ -575,22 +575,12 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
     event_values <- c(event_values[!is_plot], written)
   }
 
-  # Drop placeholders whose page was never written or is blank.
-  keep <- rep(TRUE, length(event_types))
-  for (index in which(event_types == "PLOT")) {
-    size <- file.info(event_values[index])$size
-    if (is.na(size) || size <= 2500) {
-      keep[index] <- FALSE
-      unlink(event_values[index])
-    }
-  }
-
   list(
     success = success,
     started_at = started_at,
     finished_at = as.numeric(Sys.time()) * 1000,
-    event_types = event_types[keep],
-    event_values = event_values[keep]
+    event_types = event_types,
+    event_values = event_values
   )
 }
 
