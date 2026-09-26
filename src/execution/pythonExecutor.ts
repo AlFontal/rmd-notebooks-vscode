@@ -65,11 +65,6 @@ export class PythonExecutor implements Executor {
     return ["python", "py"].includes(language.toLowerCase());
   }
 
-  public async warmupSession(documentUri: string): Promise<void> {
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(documentUri))?.uri.fsPath;
-    await this.getOrCreateSession(documentUri, workspaceFolder).ready();
-  }
-
   public async executeChunk(context: ExecutionContext): Promise<ExecutionResult> {
     const workingDirectory = context.workingDirectory ?? context.workspaceFolder;
     const payload = await this.getOrCreateSession(context.documentUri, workingDirectory).execute(

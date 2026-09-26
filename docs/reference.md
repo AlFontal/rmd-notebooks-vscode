@@ -32,14 +32,11 @@ The notebook toolbar also exposes preview, stop, restart, and source-view action
 | `rmdNotebooks.python.startupTimeoutMs` | `30000` | Python startup timeout |
 | `rmdNotebooks.execution.interactiveFallbackTimeoutMs` | `0` | Timeout before treating an inline chunk as requiring terminal input; `0` disables it |
 | `rmdNotebooks.execution.interactiveFallbackBehavior` | `prompt` | Fallback behavior: `prompt`, `terminal`, or `error` |
-| `rmdNotebooks.output.maxTextLines` | `16` | Reserved output-preview compatibility setting |
-| `rmdNotebooks.output.maxPreviewCharacters` | `160` | Maximum inline text-preview length |
-| `rmdNotebooks.output.plotWidth` | `320` | Maximum inline plot-preview width |
-| `rmdNotebooks.output.plotHeight` | `220` | Maximum inline plot-preview height |
 | `rmdNotebooks.output.dataFrameRender` | `true` | Render R data frames as HTML tables |
 | `rmdNotebooks.output.dataFrameMaxRows` | `50` | Row threshold for collapsed R data frames |
 | `rmdNotebooks.output.dataFrameMaxColumns` | `50` | Column threshold for collapsed R data frames |
-| `rmdNotebooks.output.revealMode` | `errors` | When raw-editor execution reveals the output panel |
+
+`rmdNotebooks.output.maxTextLines`, `output.maxPreviewCharacters`, `output.plotWidth`, `output.plotHeight`, and `output.revealMode` are deprecated. They belonged to the removed raw-editor execution mode, have no effect, and will be removed in a future release.
 
 ## Chunk options
 

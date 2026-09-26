@@ -4,6 +4,8 @@
 
 - save `.Rmd` and `.qmd` notebooks without rewriting untouched source: blank lines between blocks, the final newline, CRLF line endings, and blank lines inside chunk bodies and front matter are preserved instead of growing or being dropped on every save (#33)
 - read chunk labels written after a comma (`{r, setup}`) consistently, so such notebooks no longer open as modified (#35)
+- deprecate `rmdNotebooks.output.maxTextLines`, `output.maxPreviewCharacters`, `output.plotWidth`, `output.plotHeight`, and `output.revealMode`; they belonged to the unused raw-editor execution mode and have no effect
+- remove the unused raw-editor execution code (CodeLens, inline decorations, output previews) and other dead code
 
 ## 0.6.3
 
