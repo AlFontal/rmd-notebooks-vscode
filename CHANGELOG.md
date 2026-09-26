@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - save `.Rmd` and `.qmd` notebooks without rewriting untouched source: blank lines between blocks, the final newline, CRLF line endings, and blank lines inside chunk bodies and front matter are preserved instead of growing or being dropped on every save (#33)
 - read chunk labels written after a comma (`{r, setup}`) consistently, so such notebooks no longer open as modified (#35)
