@@ -30,6 +30,19 @@ describe("package manifest", () => {
     assert.equal(properties["rmdNotebooks.python.startupTimeoutMs"].default, 30000);
   });
 
+  it("marks settings of the removed raw-editor mode as deprecated", () => {
+    const properties: Record<string, object> = packageJson.contributes.configuration.properties;
+    for (const key of [
+      "rmdNotebooks.output.maxTextLines",
+      "rmdNotebooks.output.maxPreviewCharacters",
+      "rmdNotebooks.output.plotWidth",
+      "rmdNotebooks.output.plotHeight",
+      "rmdNotebooks.output.revealMode"
+    ]) {
+      assert.ok(properties[key] && "deprecationMessage" in properties[key], `${key} should carry a deprecationMessage.`);
+    }
+  });
+
   it("contributes one Python environment selector command", () => {
     assert.ok(packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.selectPythonEnvironment"));
     assert.ok(!packageJson.contributes.commands.some((entry) => entry.command === "rmdNotebooks.refreshPythonEnvironments"));

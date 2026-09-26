@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { ChunkIdentitySeed, ChunkOutputRecord, ImageOutputItem, OutputItem } from "../document/chunkTypes";
+import { ChunkOutputRecord, ImageOutputItem, OutputItem } from "../document/chunkTypes";
 
 const STORAGE_PREFIX = "rmdNotebooks.outputs.v1:";
 const ARTIFACT_PREFIX = "artifact:";
@@ -20,19 +20,6 @@ export class OutputStore {
 
   public async clearDocumentOutputs(documentUri: string): Promise<void> {
     await this.context.workspaceState.update(this.getKey(documentUri), []);
-  }
-
-  public toIdentitySeeds(outputs: Iterable<ChunkOutputRecord>): ChunkIdentitySeed[] {
-    return [...outputs].map((record) => ({
-      chunkId: record.chunkId,
-      contentHash: record.contentHash,
-      headerHash: record.headerHash,
-      bodyHash: record.bodyHash,
-      language: record.language,
-      label: record.label,
-      startLine: record.startLine,
-      header: record.header
-    }));
   }
 
   public async getArtifactDirectory(documentUri: string): Promise<string | undefined> {

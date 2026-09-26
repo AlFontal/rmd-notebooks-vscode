@@ -68,7 +68,6 @@ export interface ExecutionResult {
 export interface Executor {
   language: string;
   canHandle(language: string): boolean;
-  warmupSession?(documentUri: string): Promise<void>;
   executeChunk(context: ExecutionContext): Promise<ExecutionResult>;
   interruptSession?(documentUri: string): Promise<void>;
   disposeSession?(documentUri: string): Promise<void>;

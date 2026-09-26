@@ -238,25 +238,29 @@
           "type": "number",
           "default": 16,
           "minimum": 1,
-          "description": "Reserved for output preview compatibility."
+          "description": "Deprecated: has no effect and will be removed in a future release.",
+          "deprecationMessage": "Deprecated: has no effect and will be removed in a future release."
         },
         "rmdNotebooks.output.maxPreviewCharacters": {
           "type": "number",
           "default": 160,
           "minimum": 40,
-          "description": "Maximum number of characters shown in the inline text preview for each chunk."
+          "description": "Deprecated: inline text previews were part of the removed raw-editor mode. This setting has no effect and will be removed in a future release.",
+          "deprecationMessage": "Deprecated: inline text previews were part of the removed raw-editor mode. This setting has no effect and will be removed in a future release."
         },
         "rmdNotebooks.output.plotWidth": {
           "type": "number",
           "default": 320,
           "minimum": 120,
-          "description": "Maximum width in pixels for inline plot previews before viewport scaling is applied."
+          "description": "Deprecated: inline plot previews were part of the removed raw-editor mode. This setting has no effect and will be removed in a future release.",
+          "deprecationMessage": "Deprecated: inline plot previews were part of the removed raw-editor mode. This setting has no effect and will be removed in a future release."
         },
         "rmdNotebooks.output.plotHeight": {
           "type": "number",
           "default": 220,
           "minimum": 120,
-          "description": "Maximum height in pixels for inline plot previews before viewport scaling is applied."
+          "description": "Deprecated: inline plot previews were part of the removed raw-editor mode. This setting has no effect and will be removed in a future release.",
+          "deprecationMessage": "Deprecated: inline plot previews were part of the removed raw-editor mode. This setting has no effect and will be removed in a future release."
         },
         "rmdNotebooks.output.dataFrameRender": {
           "type": "boolean",
@@ -283,7 +287,8 @@
             "never"
           ],
           "default": "errors",
-          "description": "When raw editor chunk execution automatically reveals the Rmd Notebooks output panel. Notebook cell errors remain inline."
+          "description": "Deprecated: notebook results always render inline and the output panel is never revealed automatically. This setting has no effect and will be removed in a future release.",
+          "deprecationMessage": "Deprecated: notebook results always render inline and the output panel is never revealed automatically. This setting has no effect and will be removed in a future release."
         }
       }
     }

@@ -75,12 +75,6 @@ export class RExecutor implements Executor {
     return language.toLowerCase() === "r";
   }
 
-  public async warmupSession(documentUri: string): Promise<void> {
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(documentUri))?.uri.fsPath;
-    const session = this.getOrCreateSession(documentUri, workspaceFolder);
-    await session.ready();
-  }
-
   public async executeChunk(context: ExecutionContext): Promise<ExecutionResult> {
     const session = this.getOrCreateSession(context.documentUri, context.workspaceFolder);
     const configuration = vscode.workspace.getConfiguration("rmdNotebooks");
@@ -91,14 +85,16 @@ export class RExecutor implements Executor {
       maxColumns: configuration.get<number>("output.dataFrameMaxColumns", 50)
     };
     const payload = await session.execute(
-      context.code,
-      context.workingDirectory ?? context.workspaceFolder,
-      context.artifactDirectory,
-      context.plot,
-      dataFrame,
-      timeoutMs,
-      context.prompt,
-      context.onStart,
+      {
+        code: context.code,
+        workingDirectory: context.workingDirectory ?? context.workspaceFolder,
+        artifactDirectory: context.artifactDirectory,
+        plot: context.plot,
+        dataFrame,
+        timeoutMs,
+        promptHandler: context.prompt,
+        onStart: context.onStart
+      },
       context.token
     );
 
@@ -258,14 +254,6 @@ class RSession {
         this.startupErrors.push(text);
       } else if (this.pending) {
         this.runtimeStderr += text;
-        return;
-      }
-
-      if (this.pending && !this.sessionReady) {
-        this.clearExecutionTimeout();
-        this.promptHandler = undefined;
-        this.pending.reject(new Error(text));
-        this.pending = undefined;
       }
     });
     this.process.on("error", (error) => {
@@ -302,25 +290,11 @@ class RSession {
     await this.readyPromise;
   }
 
-  public execute(
-    code: string,
-    workingDirectory?: string,
-    artifactDirectory?: string,
-    plot?: ExecutionContext["plot"],
-    dataFrame?: DataFrameRenderOptions,
-    timeoutMs = 15000,
-    promptHandler?: (request: InteractivePromptRequest) => Promise<InteractivePromptResponse>,
-    onStart?: (executionOrder: number) => void,
-    token?: ExecutionCancellationToken
-  ): Promise<RawExecutionPayload> {
+  public execute(request: ExecutionRequest, token?: ExecutionCancellationToken): Promise<RawExecutionPayload> {
     // Chunks are queued instead of rejected: a chunk requested while another is
     // running waits its turn and runs in order, like cells in a Jupyter notebook.
     return new Promise<RawExecutionPayload>((resolve, reject) => {
-      const task: QueuedExecution = {
-        request: { code, workingDirectory, artifactDirectory, plot, dataFrame, timeoutMs, promptHandler, onStart },
-        resolve,
-        reject
-      };
+      const task: QueuedExecution = { request, resolve, reject };
       this.queue.push(task);
       // Cancelling one cell affects only that cell: if it is still queued it is
       // dropped; if it is the one running it is interrupted. The rest keep going.
@@ -612,10 +586,12 @@ class RSession {
   }
 }
 
-function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
+// A protocol message is KEY:value metadata lines plus SECTION:<NAME>:COUNT:<n>
+// headers, each followed by n encoded LINE: entries.
+function parseProtocolMessage(lines: string[]): { metadata: Map<string, string>; sections: Map<string, string[]> } {
   const metadata = new Map<string, string>();
   const sections = new Map<string, string[]>();
-  
+
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     const sectionHeader = line.match(/^SECTION:([A-Z_]+):COUNT:(\d+)$/);
@@ -635,6 +611,12 @@ function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
       metadata.set(line.slice(0, separatorIndex), line.slice(separatorIndex + 1));
     }
   }
+
+  return { metadata, sections };
+}
+
+function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
+  const { metadata, sections } = parseProtocolMessage(lines);
 
   return {
     success: metadata.get("SUCCESS") === "1",
@@ -649,28 +631,7 @@ function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
 }
 
 function parsePromptRequest(lines: string[]): InteractivePromptRequest {
-  const metadata = new Map<string, string>();
-  const sections = new Map<string, string[]>();
-  
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const sectionHeader = line.match(/^SECTION:([A-Z_]+):COUNT:(\d+)$/);
-    if (sectionHeader) {
-      const [, sectionName, countText] = sectionHeader;
-      const count = Number.parseInt(countText, 10);
-      const values: string[] = [];
-      for (let offset = 0; offset < count && index + 1 < lines.length; offset += 1) {
-        values.push(decodeProtocolLine(stripProtocolLinePrefix(lines[++index])));
-      }
-      sections.set(sectionName, values);
-      continue;
-    }
-
-    const separatorIndex = line.indexOf(":");
-    if (separatorIndex > 0) {
-      metadata.set(line.slice(0, separatorIndex), line.slice(separatorIndex + 1));
-    }
-  }
+  const { metadata, sections } = parseProtocolMessage(lines);
 
   const kind = metadata.get("KIND");
   if (kind !== "select" && kind !== "input" && kind !== "confirm") {
