@@ -42,7 +42,13 @@ The notebook toolbar also exposes preview, stop, restart, and source-view action
 
 Common knitr chunk-header options and leading Quarto `#|` options are supported, including `eval`, `include`, `output`, figure size/aspect/DPI, and output hiding.
 
-`echo`, `warning`, and `message` are parsed but are not fully enforced.
+R messages, warnings, and errors are shown separately, formatted like knitr (`Warning in f(): ...`, `Error: ...`):
+
+- `message=FALSE` / `#| message: false` hides messages and `warning=FALSE` / `#| warning: false` hides warnings, even when the chunk fails.
+- `results='hide'` hides printed results but keeps messages, warnings, and plots, as in knitr.
+- `include=FALSE` and `output: false` hide everything except errors.
+
+`echo` is parsed but has no effect, since the code is always shown in its cell. Python warnings are not yet filtered by `warning`.
 
 ## Known limitations
 

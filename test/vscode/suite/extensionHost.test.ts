@@ -505,6 +505,44 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(state.outputChannelText.includes("real failure"));
   });
 
+  it("keeps a failed cell's matplotlib figure with that cell and shows plots without warnings", async function () {
+    if (!pythonHasModule("matplotlib")) {
+      this.skip();
+    }
+    await writeFixture(
+      "python-figures.qmd",
+      [
+        "```{python failing-plot}",
+        "import matplotlib.pyplot as plt",
+        "plt.plot([1, 2])",
+        "raise ValueError('plot failure')",
+        "```",
+        "",
+        "```{python text-only}",
+        "print('no figure here')",
+        "```",
+        "",
+        "```{python shown-plot}",
+        "plt.plot([3, 4])",
+        "plt.show()",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("python-figures.qmd");
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.length === 3 && candidate.outputs.every((record) => record.status !== "running")
+    );
+
+    assert.deepEqual(state.outputs.map((record) => record.status), ["error", "success", "success"]);
+    assert.deepEqual(state.outputs[0].outputTypes, ["error", "display"]);
+    assert.deepEqual(state.outputs[1].outputTypes, ["text"]);
+    assert.deepEqual(state.outputs[2].outputTypes, ["display"]);
+    assert.ok(!state.outputChannelText.includes("non-interactive"));
+  });
+
   it("honors leading Quarto cell options when running all Python chunks", async () => {
     await writeFixture(
       "python-quarto-options.qmd",
@@ -1537,6 +1575,64 @@ describe("Rmd Notebooks Notebook Host", () => {
 
     assert.deepEqual(state.outputs[0].outputTypes, ["image"]);
     assert.ok(renderedCell.outputs.every((output) => output.items.every((item) => item.mime !== "application/vnd.code.notebook.stdout")));
+  });
+
+  it("classifies R messages, warnings and errors and honors message/warning/include options", async () => {
+    await writeFixture(
+      "r-conditions.qmd",
+      [
+        "```{r setup, include=FALSE}",
+        "message('setup message')",
+        "warning('setup warning')",
+        "```",
+        "",
+        "```{r quiet, message=FALSE}",
+        "message('hidden message')",
+        "warning('visible warning')",
+        "cat('printed\\n')",
+        "```",
+        "",
+        "```{r}",
+        "#| warning: false",
+        "message('visible message')",
+        "x <- log(-1)",
+        "```",
+        "",
+        "```{r}",
+        "f <- function(x) stop('inner failure')",
+        "f(1)",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("r-conditions.qmd");
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.length === 4 && candidate.outputs.every((record) => record.status !== "running")
+    );
+    const cells = editor.notebook.getCells().filter(isExecutableChunkCell);
+
+    assert.deepEqual(state.outputs.map((record) => record.status), ["success", "success", "success", "error"]);
+    assert.deepEqual(state.outputs[0].outputTypes, []);
+    assert.deepEqual(state.outputs[1].outputTypes, ["text", "stream"]);
+    assert.deepEqual(state.outputs[2].outputTypes, ["stream"]);
+    assert.deepEqual(state.outputs[3].outputTypes, ["error"]);
+
+    const quiet = await waitForNotebookOutput(cells[1], (cell) => cell.outputs.length > 0);
+    const quietStderr = notebookOutputText(quiet, "application/vnd.code.notebook.stderr");
+    assert.ok(quietStderr.includes("Warning: visible warning"), quietStderr);
+    assert.ok(!quietStderr.includes("hidden message"), quietStderr);
+
+    const noWarnings = await waitForNotebookOutput(cells[2], (cell) => cell.outputs.length > 0);
+    const noWarningsStderr = notebookOutputText(noWarnings, "application/vnd.code.notebook.stderr");
+    assert.ok(noWarningsStderr.includes("visible message"), noWarningsStderr);
+    assert.ok(!noWarningsStderr.includes("NaNs produced"), noWarningsStderr);
+
+    const failed = await waitForNotebookOutput(cells[3], (cell) => cell.outputs.length > 0);
+    assert.ok(notebookOutputText(failed, "application/vnd.code.notebook.stderr").includes("Error in f(1): inner failure"));
+    assert.ok(!state.outputChannelText.includes("setup message"));
+    assert.ok(state.outputChannelText.includes("[warning]"));
   });
 
   it("marks qmd output stale after editing the cell body", async () => {
@@ -2643,6 +2739,15 @@ async function openNotebookEditor(name: string): Promise<vscode.NotebookEditor> 
     await extensionApi.selectTestPythonInterpreter(notebook.uri.toString(), requireTestPython());
   }
   return editor;
+}
+
+function pythonHasModule(moduleName: string): boolean {
+  try {
+    execFileSync(requireTestPython(), ["-c", `import ${moduleName}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function requireTestPython(): string {

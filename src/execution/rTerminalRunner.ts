@@ -15,12 +15,14 @@ export class RTerminalRunner implements vscode.Disposable {
     );
   }
 
-  public async runChunk(code: string, workspaceFolder?: string): Promise<void> {
-    const terminal = this.getOrCreateTerminal(workspaceFolder);
+  // Mirrors the inline session: R starts in the workspace root so project startup
+  // files (.Rprofile, renv) apply, and each chunk runs from the document directory.
+  public async runChunk(code: string, startupDirectory?: string, workingDirectory = startupDirectory): Promise<void> {
+    const terminal = this.getOrCreateTerminal(startupDirectory);
     terminal.show(false);
 
-    if (workspaceFolder) {
-      terminal.sendText(`setwd(${toRString(workspaceFolder)})`, true);
+    if (workingDirectory) {
+      terminal.sendText(`setwd(${toRString(workingDirectory)})`, true);
     }
 
     terminal.sendText(code, true);

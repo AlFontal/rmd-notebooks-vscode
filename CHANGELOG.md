@@ -6,6 +6,9 @@
 - read chunk labels written after a comma (`{r, setup}`) consistently, so such notebooks no longer open as modified (#35)
 - deprecate `rmdNotebooks.output.maxTextLines`, `output.maxPreviewCharacters`, `output.plotWidth`, `output.plotHeight`, and `output.revealMode`; they belonged to the unused raw-editor execution mode and have no effect
 - remove the unused raw-editor execution code (CodeLens, inline decorations, output previews) and other dead code
+- show R messages and warnings separately from errors, formatted like knitr, so `include=FALSE` setup chunks stay silent, and honor `message`/`warning` chunk options and Quarto `#| message:` / `#| results:`
+- keep a failing Python cell's matplotlib figure with that cell instead of leaking it into the next one, and stop `plt.show()` from printing a non-interactive backend warning
+- run chunks sent to the R terminal from the document directory, matching inline execution
 
 ## 0.6.3
 

@@ -16,6 +16,7 @@ import os
 import sys
 import time
 import traceback
+import warnings
 from typing import Any
 
 
@@ -222,6 +223,12 @@ def _capture_matplotlib_plots(plot: dict[str, Any]) -> list[dict[str, Any]]:
     return displays
 
 
+def _close_matplotlib_plots() -> None:
+    pyplot = sys.modules.get("matplotlib.pyplot")
+    if pyplot is not None:
+        pyplot.close("all")
+
+
 def _execute(
     request: dict[str, Any],
     ipython_runtime: tuple[Any, dict[str, Any]],
@@ -257,12 +264,18 @@ def _execute(
     finally:
         builtins.input = original_input
 
-    if success:
-        try:
+    # Collect figures even when the cell failed (as Jupyter does); leaving them open
+    # would attach them to the next cell's output. An interrupted cell's output is
+    # discarded, so its figures are closed instead.
+    try:
+        if cancelled:
+            _close_matplotlib_plots()
+        else:
             events.extend(_capture_matplotlib_plots(request.get("plot") or {}))
-        except Exception:
-            success = False
-            events.append({"type": "error", "text": traceback.format_exc()})
+    except Exception:
+        success = False
+        events.append({"type": "error", "text": traceback.format_exc()})
+        _close_matplotlib_plots()
 
     normalized_events: list[dict[str, Any]] = []
     for event in events:
@@ -295,6 +308,13 @@ def main() -> None:
             "message": "Python chunks require IPython in the selected environment."
         })
         return
+    # Figures are captured after every cell, so plt.show() on the headless Agg
+    # backend is expected; silence matplotlib's "cannot be shown" warning for it.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"(FigureCanvasAgg is non-interactive|Matplotlib is currently using agg)",
+        category=UserWarning,
+    )
     _emit(READY_PREFIX, {"engine": "ipython"})
 
     while True:

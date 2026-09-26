@@ -2,7 +2,15 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as vscode from "vscode";
-import { ErrorOutputItem, HtmlOutputItem, ImageOutputItem, MarkdownOutputItem, OutputItem, TextOutputItem } from "../document/chunkTypes";
+import {
+  ErrorOutputItem,
+  HtmlOutputItem,
+  ImageOutputItem,
+  MarkdownOutputItem,
+  OutputItem,
+  StreamOutputItem,
+  TextOutputItem
+} from "../document/chunkTypes";
 import {
   Executor,
   ExecutionCancellationToken,
@@ -33,6 +41,9 @@ interface RawExecutionPayload {
   stderr: string;
   html: string;
   markdown: string;
+  messages: string;
+  warnings: string;
+  errors: string;
   plots: string[];
 }
 
@@ -108,10 +119,19 @@ export class RExecutor implements Executor {
     }
 
     if (payload.stderr.trim().length > 0) {
-      items.push({
-        type: "error",
-        text: payload.stderr.trimEnd()
-      } satisfies ErrorOutputItem);
+      items.push({ type: "stream", name: "stderr", text: payload.stderr.trimEnd() } satisfies StreamOutputItem);
+    }
+
+    if (payload.messages.trim().length > 0) {
+      items.push({ type: "stream", name: "stderr", kind: "message", text: payload.messages.trimEnd() } satisfies StreamOutputItem);
+    }
+
+    if (payload.warnings.trim().length > 0) {
+      items.push({ type: "stream", name: "stderr", kind: "warning", text: payload.warnings.trimEnd() } satisfies StreamOutputItem);
+    }
+
+    if (payload.errors.trim().length > 0) {
+      items.push({ type: "error", text: payload.errors.trimEnd() } satisfies ErrorOutputItem);
     }
 
     if (payload.html.trim().length > 0) {
@@ -626,6 +646,9 @@ function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
     stderr: (sections.get("STDERR") ?? []).join("\n"),
     html: (sections.get("HTML") ?? []).join("\n"),
     markdown: (sections.get("MARKDOWN") ?? []).join("\n"),
+    messages: (sections.get("MESSAGE") ?? []).join("\n"),
+    warnings: (sections.get("WARNING") ?? []).join("\n"),
+    errors: (sections.get("ERROR") ?? []).join("\n"),
     plots: (sections.get("PLOTS") ?? []).filter((entry) => entry.trim().length > 0)
   };
 }

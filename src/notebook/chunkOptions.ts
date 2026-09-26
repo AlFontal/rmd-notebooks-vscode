@@ -33,9 +33,10 @@ export function parseQuartoCellOptions(body: string): ChunkOptions {
     const numericValue = parseNumericOption(rawValue);
     const stringValue = stripOuterQuotes(rawValue);
     if (key === "label") options.label = stringValue;
-    else if (["eval", "include", "echo", "warning"].includes(key) && booleanValue !== undefined) {
-      options[key as "eval" | "include" | "echo" | "warning"] = booleanValue;
-    } else if (key === "output") options.output = booleanValue ?? stringValue.toLowerCase();
+    else if (["eval", "include", "echo", "warning", "message"].includes(key) && booleanValue !== undefined) {
+      options[key as "eval" | "include" | "echo" | "warning" | "message"] = booleanValue;
+    } else if (key === "results") options.results = stringValue.toLowerCase();
+    else if (key === "output") options.output = booleanValue ?? stringValue.toLowerCase();
     else if (key === "fig-width" && numericValue !== undefined) options.figWidth = numericValue;
     else if (key === "fig-height" && numericValue !== undefined) options.figHeight = numericValue;
     else if (key === "fig-asp" && numericValue !== undefined) options.figAsp = numericValue;
@@ -124,10 +125,19 @@ export function applyChunkOptionsToResult(result: ExecutionResult, options: Chun
       return false;
     }
 
+    // Like knitr, message=FALSE and warning=FALSE apply even when the chunk fails.
+    if (item.type === "stream" && item.kind === "message" && options.message === false) {
+      return false;
+    }
+    if (item.type === "stream" && item.kind === "warning" && options.warning === false) {
+      return false;
+    }
+
+    // results='hide' hides printed results but, as in knitr, not messages or warnings.
     if (
       result.success &&
       options.results === "hide" &&
-      (item.type === "text" || item.type === "stream" || item.type === "html" || item.type === "markdown" || item.type === "display")
+      (item.type === "text" || (item.type === "stream" && !item.kind) || item.type === "html" || item.type === "markdown" || item.type === "display")
     ) {
       return false;
     }

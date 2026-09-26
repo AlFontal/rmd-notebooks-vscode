@@ -124,4 +124,39 @@ describe("chunkOptions", () => {
 
     assert.deepEqual(result.items, [{ type: "image", path: "/tmp/plot.png", mimeType: "image/png" }]);
   });
+
+  describe("R messages and warnings", () => {
+    const items = [
+      { type: "text" as const, text: "result" },
+      { type: "stream" as const, name: "stderr" as const, kind: "message" as const, text: "Loading package" },
+      { type: "stream" as const, name: "stderr" as const, kind: "warning" as const, text: "Warning: careful" },
+      { type: "stream" as const, name: "stderr" as const, text: "raw stderr" }
+    ];
+    const run = (options: Parameters<typeof applyChunkOptionsToResult>[1], success = true) =>
+      applyChunkOptionsToResult({ success, startedAt: 1, finishedAt: 2, items }, options).items.map((item) => ("text" in item ? item.text : item.type));
+
+    it("hides them with include=FALSE instead of treating them as errors", () => {
+      assert.deepEqual(run({ include: false }), []);
+    });
+
+    it("drops messages for message=FALSE and warnings for warning=FALSE", () => {
+      assert.deepEqual(run({ message: false }), ["result", "Warning: careful", "raw stderr"]);
+      assert.deepEqual(run({ warning: false }), ["result", "Loading package", "raw stderr"]);
+    });
+
+    it("applies message=FALSE and warning=FALSE even when the chunk fails", () => {
+      assert.deepEqual(run({ message: false, warning: false }, false), ["result", "raw stderr"]);
+    });
+
+    it("keeps them for results='hide' while hiding printed output", () => {
+      assert.deepEqual(run({ results: "hide" }), ["Loading package", "Warning: careful"]);
+    });
+  });
+
+  it("parses Quarto message and results options", () => {
+    assert.deepEqual(
+      parseQuartoCellOptions("#| message: false\n#| results: 'hide'\n#| warning: false\nx"),
+      { message: false, results: "hide", warning: false }
+    );
+  });
 });
