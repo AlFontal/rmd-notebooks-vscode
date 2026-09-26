@@ -505,7 +505,10 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(state.outputChannelText.includes("real failure"));
   });
 
-  it("keeps a failed cell's matplotlib figure with that cell and shows plots without warnings", async () => {
+  it("keeps a failed cell's matplotlib figure with that cell and shows plots without warnings", async function () {
+    if (!pythonHasModule("matplotlib")) {
+      this.skip();
+    }
     await writeFixture(
       "python-figures.qmd",
       [
@@ -2736,6 +2739,15 @@ async function openNotebookEditor(name: string): Promise<vscode.NotebookEditor> 
     await extensionApi.selectTestPythonInterpreter(notebook.uri.toString(), requireTestPython());
   }
   return editor;
+}
+
+function pythonHasModule(moduleName: string): boolean {
+  try {
+    execFileSync(requireTestPython(), ["-c", `import ${moduleName}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function requireTestPython(): string {
