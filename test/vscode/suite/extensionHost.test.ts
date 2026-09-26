@@ -20,6 +20,7 @@ interface InlineChunksExtensionApi {
       status: string;
       stale: boolean;
       outputTypes: string[];
+      imagePaths: string[];
     }>;
     outputChannelText: string;
   }>;
@@ -1615,7 +1616,8 @@ describe("Rmd Notebooks Notebook Host", () => {
 
     assert.deepEqual(state.outputs.map((record) => record.status), ["success", "success", "success", "error"]);
     assert.deepEqual(state.outputs[0].outputTypes, []);
-    assert.deepEqual(state.outputs[1].outputTypes, ["text", "stream"]);
+    // Output keeps its order: the warning is raised before cat() prints.
+    assert.deepEqual(state.outputs[1].outputTypes, ["stream", "text"]);
     assert.deepEqual(state.outputs[2].outputTypes, ["stream"]);
     assert.deepEqual(state.outputs[3].outputTypes, ["error"]);
 
@@ -1633,6 +1635,104 @@ describe("Rmd Notebooks Notebook Host", () => {
     assert.ok(notebookOutputText(failed, "application/vnd.code.notebook.stderr").includes("Error in f(1): inner failure"));
     assert.ok(!state.outputChannelText.includes("setup message"));
     assert.ok(state.outputChannelText.includes("[warning]"));
+  });
+
+  it("keeps R text and plots in the order they were produced", async () => {
+    await writeFixture(
+      "r-output-order.qmd",
+      [
+        "```{r}",
+        "print('before plot')",
+        "plot(1:3)",
+        "lines(3:1)",
+        "print('after plot')",
+        "for (i in 1:2) plot(i)",
+        "par(mfrow = c(1, 2)); plot(1); plot(2)",
+        "```",
+        "",
+        "```{r}",
+        "grid::grid.draw(grid::pointsGrob(1:20 / 21, (1:20 / 21)^2))",
+        "plot(1)",
+        "```",
+        ""
+      ].join("\n")
+    );
+
+    const editor = await openNotebookEditor("r-output-order.qmd");
+    await vscode.commands.executeCommand("rmdNotebooks.runAllChunks");
+    const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+      candidate.outputs.length === 2 && candidate.outputs.every((record) => record.status === "success")
+    );
+
+    // One image per page: the lines() call extends the first plot and the two
+    // mfrow panels share a page.
+    assert.deepEqual(state.outputs[0].outputTypes, ["text", "image", "text", "image", "image", "image"]);
+    // grid.draw() on a fresh device starts a page without a hook; both images are
+    // still kept, even though their position can no longer be tracked.
+    assert.deepEqual(state.outputs[1].outputTypes, ["image", "image"]);
+  });
+
+  it("deletes current and replaced plot files on Clear All", async () => {
+    await writeFixture("r-plot-cleanup.qmd", ["```{r}", "plot(cars)", "```", ""].join("\n"));
+
+    const editor = await openNotebookEditor("r-plot-cleanup.qmd");
+    const runPlot = async (): Promise<string> => {
+      editor.selection = singleCellRange(findFirstCodeCellIndex(editor.notebook));
+      const previous = (await extensionApi.getDocumentState(editor.notebook.uri.toString())).outputs[0]?.imagePaths[0];
+      await vscode.commands.executeCommand("rmdNotebooks.runCurrentChunk");
+      const state = await waitForDocumentState(editor.notebook.uri, (candidate) =>
+        candidate.outputs[0]?.status === "success" && candidate.outputs[0].imagePaths[0] !== previous
+      );
+      return state.outputs[0].imagePaths[0];
+    };
+
+    const first = await runPlot();
+    const second = await runPlot();
+    assert.notEqual(first, second);
+    // Replaced plots are only pruned on open, close and Clear All, never while a
+    // chunk might be running.
+    assert.equal(await fileExists(first), true);
+    assert.equal(await fileExists(second), true);
+
+    await vscode.commands.executeCommand("rmdNotebooks.clearAllOutputs");
+    await waitFor(async () => ((await fileExists(first)) || (await fileExists(second)) ? undefined : true));
+  });
+
+  it("saves unsaved notebook edits through VS Code before showing the raw source", async () => {
+    await writeFixture("view-source-save.qmd", ["```{r}", "x <- 1", "```", ""].join("\n"));
+
+    const editor = await openNotebookEditor("view-source-save.qmd");
+    const notebook = editor.notebook;
+    const cell = notebook.cellAt(findFirstCodeCellIndex(notebook));
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(cell.document.uri, cell.document.lineAt(0).range, "x <- 2");
+    assert.equal(await vscode.workspace.applyEdit(edit), true);
+    await waitFor(() => (notebook.isDirty ? true : undefined));
+
+    await vscode.commands.executeCommand("rmdNotebooks.toggleSourceView");
+    const textEditor = await waitFor(() => {
+      const candidate = vscode.window.activeTextEditor;
+      return candidate?.document.uri.toString() === notebook.uri.toString() ? candidate : undefined;
+    });
+
+    assert.ok(textEditor.document.getText().includes("x <- 2"));
+    assert.equal(notebook.isDirty, false, "The notebook should be saved, not left dirty.");
+    const onDisk = Buffer.from(await vscode.workspace.fs.readFile(notebook.uri)).toString("utf8");
+    assert.equal(onDisk, "```{r}\nx <- 2\n```\n");
+
+    // Unsaved raw edits are saved before switching back, so the notebook shows them.
+    const rawEdit = new vscode.WorkspaceEdit();
+    rawEdit.replace(textEditor.document.uri, textEditor.document.lineAt(1).range, "x <- 3");
+    assert.equal(await vscode.workspace.applyEdit(rawEdit), true);
+    await vscode.commands.executeCommand("rmdNotebooks.toggleSourceView");
+    const notebookEditor = await waitFor(() => {
+      const candidate = vscode.window.activeNotebookEditor;
+      return candidate?.notebook.uri.toString() === notebook.uri.toString() ? candidate : undefined;
+    });
+    await waitFor(() =>
+      notebookEditor.notebook.cellAt(findFirstCodeCellIndex(notebookEditor.notebook)).document.getText() === "x <- 3" ? true : undefined
+    );
+    assert.equal(textEditor.document.isDirty, false);
   });
 
   it("marks qmd output stale after editing the cell body", async () => {
@@ -2089,10 +2189,8 @@ describe("Rmd Notebooks Notebook Host", () => {
 
     assert.ok(state.outputChannelText.includes("SECTION:HTML:COUNT:1"));
     assert.ok(state.outputChannelText.includes("RMD_NOTEBOOKS_END"));
-    assert.ok(
-      state.outputChannelText.includes("LINE:%2Ftmp%2Fplot.png") ||
-      state.outputChannelText.includes("LINE:/tmp/plot.png")
-    );
+    // Text that already looks URL-encoded must come back unchanged.
+    assert.ok(state.outputChannelText.includes("LINE:%2Ftmp%2Fplot.png"));
   });
 
   it("handles menu() prompts inline with a selection picker", async () => {
@@ -2957,4 +3055,13 @@ async function waitFor<T>(producer: () => Promise<T | undefined> | T | undefined
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(vscode.Uri.file(filePath));
+    return true;
+  } catch {
+    return false;
+  }
 }

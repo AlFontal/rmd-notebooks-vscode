@@ -9,6 +9,12 @@
 - show R messages and warnings separately from errors, formatted like knitr, so `include=FALSE` setup chunks stay silent, and honor `message`/`warning` chunk options and Quarto `#| message:` / `#| results:`
 - keep a failing Python cell's matplotlib figure with that cell instead of leaking it into the next one, and stop `plt.show()` from printing a non-interactive backend warning
 - run chunks sent to the R terminal from the document directory, matching inline execution
+- show R output in the order it was produced: text, messages, warnings, errors, rich output and plots are interleaved instead of grouped by type, with one plot per page
+- stop R output that already contains `%XX` sequences from being altered, and stop plot file names from using scientific notation
+- only persist stored outputs when they change instead of on every edit
+- delete plot files that no output references when a notebook opens or closes and on Clear All Outputs, and keep each document's plot files in its own folder
+- restore the remaining outputs when a stored plot file is missing, showing a note in place of the plot
+- save through VS Code when switching between the notebook and raw source views, in both directions, instead of writing the file directly
 
 ## 0.6.3
 

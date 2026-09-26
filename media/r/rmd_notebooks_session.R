@@ -5,7 +5,9 @@ user_env <- globalenv()
 options(menu.graphics = FALSE)
 
 rmd_notebooks_encode_line <- function(value) {
-  utils::URLencode(enc2utf8(value), reserved = TRUE)
+  # repeated = TRUE: otherwise URLencode leaves text that already contains %XX
+  # sequences unencoded, which corrupts it and lets newlines break the framing.
+  utils::URLencode(enc2utf8(value), reserved = TRUE, repeated = TRUE)
 }
 
 rmd_notebooks_decode_line <- function(value) {
@@ -182,23 +184,8 @@ rmd_notebooks_format_condition <- function(prefix, condition) {
   sprintf("%s in %s: %s", prefix, paste(deparse(call, nlines = 1L), collapse = ""), text)
 }
 
-rmd_notebooks_collect_plot_paths <- function(directory, started_at) {
-  pattern <- sprintf("^plot-%s-.*\\.png$", started_at)
-  if (!dir.exists(directory)) {
-    return(character())
-  }
-
-  paths <- list.files(directory, pattern = pattern, full.names = TRUE)
-  keep <- character()
-  for (candidate in paths) {
-    info <- file.info(candidate)
-    if (!is.na(info$size) && info$size > 2500) {
-      keep <- c(keep, candidate)
-    } else if (file.exists(candidate)) {
-      unlink(candidate)
-    }
-  }
-  keep
+rmd_notebooks_remove_hook <- function(name, hook) {
+  setHook(name, Filter(function(candidate) !identical(candidate, hook), getHook(name)), "replace")
 }
 
 rmd_notebooks_read_prompt_response <- function() {
@@ -441,32 +428,89 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
   }
 
   started_at <- as.numeric(Sys.time()) * 1000
+
+  # All output is recorded as one ordered list of typed events, so text, conditions,
+  # rich output and plots are shown in the order they were produced.
+  event_types <- character()
+  event_values <- character()
+  add_event <- function(type, value) {
+    event_types <<- c(event_types, type)
+    event_values <<- c(event_values, value)
+  }
+
   stdout_buffer <- character()
   stderr_buffer <- character()
-  html_buffer <- character()
-  markdown_buffer <- character()
-  message_buffer <- character()
-  warning_buffer <- character()
-  error_buffer <- character()
+  stdout_seen <- 0L
+  stderr_seen <- 0L
   stdout_connection <- textConnection("stdout_buffer", "w", local = TRUE)
   stderr_connection <- textConnection("stderr_buffer", "w", local = TRUE)
   assign("active_stdout_connection", stdout_connection, envir = protocol_env)
   assign("active_stderr_connection", stderr_connection, envir = protocol_env)
+
+  # Moves completed stdout/stderr lines into the event list before another event is
+  # recorded, keeping them in place relative to it.
+  flush_streams <- function() {
+    if (length(stdout_buffer) > stdout_seen) {
+      add_event("STDOUT", paste(stdout_buffer[(stdout_seen + 1L):length(stdout_buffer)], collapse = "\n"))
+      stdout_seen <<- length(stdout_buffer)
+    }
+    if (length(stderr_buffer) > stderr_seen) {
+      add_event("STDERR", paste(stderr_buffer[(stderr_seen + 1L):length(stderr_buffer)], collapse = "\n"))
+      stderr_seen <<- length(stderr_buffer)
+    }
+  }
+
   width_in <- if (is.finite(plot_width_in) && plot_width_in > 0) plot_width_in else 10
   height_in <- if (is.finite(plot_height_in) && plot_height_in > 0) plot_height_in else 7.5
   dpi <- if (is.finite(plot_dpi) && plot_dpi > 0) plot_dpi else 96
   plot_width_px <- max(1, as.integer(round(width_in * dpi)))
   plot_height_px <- max(1, as.integer(round(height_in * dpi)))
-
-  plot_pattern <- if (nzchar(artifact_directory)) {
-    file.path(artifact_directory, sprintf("plot-%s-%%03d.png", started_at))
-  } else {
-    tempfile(pattern = sprintf("rmd-notebooks-%s-", started_at), fileext = ".png")
-  }
+  plot_pattern <- file.path(
+    if (nzchar(artifact_directory)) artifact_directory else tempdir(),
+    sprintf("plot-%.0f-%%03d.png", started_at)
+  )
 
   sink(stdout_connection)
   sink(stderr_connection, type = "message")
   grDevices::png(filename = plot_pattern, width = plot_width_px, height = plot_height_px, res = dpi)
+  plot_device <- grDevices::dev.cur()
+
+  # Every new page on the chunk's device records a placeholder at the current
+  # position. The device writes page k to the k-th numbered file.
+  plot_count <- 0L
+  mark_plot <- function() {
+    flush_streams()
+    plot_count <<- plot_count + 1L
+    add_event("PLOT", sprintf(plot_pattern, plot_count))
+  }
+  # plot.new() also runs for each panel of a par(mfrow) layout; only count real pages.
+  on_plot_new <- function(...) {
+    if (grDevices::dev.cur() == plot_device && isTRUE(graphics::par("page"))) mark_plot()
+  }
+  on_grid_newpage <- function(...) {
+    if (grDevices::dev.cur() == plot_device) mark_plot()
+  }
+  setHook("before.plot.new", on_plot_new, "append")
+  setHook("before.grid.newpage", on_grid_newpage, "append")
+
+  cleaned_up <- FALSE
+  cleanup <- function() {
+    if (cleaned_up) {
+      return(invisible())
+    }
+    cleaned_up <<- TRUE
+    rmd_notebooks_remove_hook("before.plot.new", on_plot_new)
+    rmd_notebooks_remove_hook("before.grid.newpage", on_grid_newpage)
+    if (plot_device %in% grDevices::dev.list()) {
+      grDevices::dev.off(plot_device)
+    }
+    sink(type = "message")
+    sink()
+    close(stdout_connection)
+    close(stderr_connection)
+    rm(list = c("active_stdout_connection", "active_stderr_connection"), envir = protocol_env)
+  }
+  on.exit(cleanup(), add = TRUE)
 
   success <- TRUE
   tryCatch({
@@ -476,57 +520,77 @@ rmd_notebooks_execute <- function(code, working_directory, artifact_directory, p
         result <- withVisible(eval(expression, envir = user_env))
         if (result$visible && !is.null(result$value)) {
           markdown_output <- rmd_notebooks_render_markdown(result$value)
+          html_output <- if (is.null(markdown_output)) rmd_notebooks_render_html(result$value) else NULL
+          if (is.null(markdown_output) && is.null(html_output) && isTRUE(df_render) && is.data.frame(result$value)) {
+            html_output <- rmd_notebooks_data_frame_to_html(result$value, df_max_rows, df_max_columns)
+          }
           if (!is.null(markdown_output)) {
-            markdown_buffer <- c(markdown_buffer, markdown_output)
+            flush_streams()
+            add_event("MARKDOWN", markdown_output)
+          } else if (!is.null(html_output)) {
+            flush_streams()
+            add_event("HTML", html_output)
           } else {
-            html_output <- rmd_notebooks_render_html(result$value)
-            if (is.null(html_output) && isTRUE(df_render) && is.data.frame(result$value)) {
-              html_output <- rmd_notebooks_data_frame_to_html(result$value, df_max_rows, df_max_columns)
-            }
-            if (!is.null(html_output)) {
-              html_buffer <- c(html_buffer, html_output)
-            } else {
-              print(result$value)
-            }
+            print(result$value)
           }
         }
       }
     }, warning = function(warning_condition) {
-      warning_buffer <<- c(warning_buffer, rmd_notebooks_format_condition("Warning", warning_condition))
+      flush_streams()
+      add_event("WARNING", rmd_notebooks_format_condition("Warning", warning_condition))
       invokeRestart("muffleWarning")
     }, message = function(message_condition) {
-      message_buffer <<- c(message_buffer, sub("\n$", "", conditionMessage(message_condition)))
+      flush_streams()
+      add_event("MESSAGE", sub("\n$", "", conditionMessage(message_condition)))
       invokeRestart("muffleMessage")
     })
   }, error = function(error_condition) {
     success <<- FALSE
-    error_buffer <<- c(error_buffer, rmd_notebooks_format_condition("Error", error_condition))
+    flush_streams()
+    add_event("ERROR", rmd_notebooks_format_condition("Error", error_condition))
   }, interrupt = function(interrupt_condition) {
     success <<- FALSE
-    error_buffer <<- c(error_buffer, "Execution interrupted.")
+    flush_streams()
+    add_event("ERROR", "Execution interrupted.")
   })
 
   rmd_notebooks_update_vscode_r_workspace()
 
-  grDevices::dev.off()
-  sink(type = "message")
-  sink()
-  close(stdout_connection)
-  close(stderr_connection)
-  rm(list = c("active_stdout_connection", "active_stderr_connection"), envir = protocol_env)
+  # Closing the connections completes any trailing partial line; closing the device
+  # writes the last page.
+  cleanup()
+  flush_streams()
+
+  # grid can start a page on a fresh device without running any hook (grid.draw()
+  # without grid.newpage()), so placeholders only match files when the counts agree.
+  # Otherwise keep every image, appended at the end, rather than risk showing one in
+  # the wrong place.
+  written <- character()
+  while (file.exists(sprintf(plot_pattern, length(written) + 1L))) {
+    written <- c(written, sprintf(plot_pattern, length(written) + 1L))
+  }
+  if (length(written) != plot_count) {
+    is_plot <- event_types == "PLOT"
+    event_types <- c(event_types[!is_plot], rep("PLOT", length(written)))
+    event_values <- c(event_values[!is_plot], written)
+  }
+
+  # Drop placeholders whose page was never written or is blank.
+  keep <- rep(TRUE, length(event_types))
+  for (index in which(event_types == "PLOT")) {
+    size <- file.info(event_values[index])$size
+    if (is.na(size) || size <= 2500) {
+      keep[index] <- FALSE
+      unlink(event_values[index])
+    }
+  }
 
   list(
     success = success,
     started_at = started_at,
     finished_at = as.numeric(Sys.time()) * 1000,
-    stdout = stdout_buffer,
-    stderr = stderr_buffer,
-    html = html_buffer,
-    markdown = markdown_buffer,
-    messages = message_buffer,
-    warnings = warning_buffer,
-    errors = error_buffer,
-    plots = rmd_notebooks_collect_plot_paths(artifact_directory, started_at)
+    event_types = event_types[keep],
+    event_values = event_values[keep]
   )
 }
 
@@ -617,14 +681,8 @@ repeat {
   cat(sprintf("SUCCESS:%s\n", if (result$success) "1" else "0"))
   cat(sprintf("STARTED_AT:%s\n", result$started_at))
   cat(sprintf("FINISHED_AT:%s\n", result$finished_at))
-  rmd_notebooks_emit_section("STDOUT", result$stdout)
-  rmd_notebooks_emit_section("STDERR", result$stderr)
-  rmd_notebooks_emit_section("HTML", result$html)
-  rmd_notebooks_emit_section("MARKDOWN", result$markdown)
-  rmd_notebooks_emit_section("MESSAGE", result$messages)
-  rmd_notebooks_emit_section("WARNING", result$warnings)
-  rmd_notebooks_emit_section("ERROR", result$errors)
-  rmd_notebooks_emit_section("PLOTS", result$plots)
+  rmd_notebooks_emit_section("EVENT_TYPES", result$event_types)
+  rmd_notebooks_emit_section("EVENT_VALUES", result$event_values)
   cat("RMD_NOTEBOOKS_RESULT_END\n")
   flush.console()
 }

@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { ChunkOutputRecord, ImageOutputItem, OutputItem } from "../document/chunkTypes";
+import { sha1 } from "../util/hash";
 
 const STORAGE_PREFIX = "rmdNotebooks.outputs.v1:";
 const ARTIFACT_PREFIX = "artifact:";
@@ -27,9 +28,42 @@ export class OutputStore {
       return undefined;
     }
 
-    const uri = vscode.Uri.joinPath(this.context.storageUri, "artifacts", sanitizePath(documentUri));
+    const uri = this.getArtifactDirectoryUri(this.context.storageUri, documentUri);
     await vscode.workspace.fs.createDirectory(uri);
     return uri.fsPath;
+  }
+
+  // Re-running or clearing a chunk leaves its previous plot files behind. Delete
+  // files in the document's artifact directory that no output record references.
+  public async pruneArtifacts(documentUri: string, outputs: Map<string, ChunkOutputRecord>): Promise<void> {
+    if (!this.context.storageUri) {
+      return;
+    }
+
+    const directory = this.getArtifactDirectoryUri(this.context.storageUri, documentUri);
+    let entries: [string, vscode.FileType][];
+    try {
+      entries = await vscode.workspace.fs.readDirectory(directory);
+    } catch {
+      return;
+    }
+
+    const referenced = new Set(
+      [...outputs.values()]
+        .flatMap((record) => record.outputs)
+        .flatMap((output) => (output.type === "image" ? [path.resolve(output.path)] : []))
+    );
+    await Promise.all(
+      entries
+        .filter(([name, type]) => type === vscode.FileType.File && !referenced.has(path.resolve(directory.fsPath, name)))
+        .map(([name]) => Promise.resolve(vscode.workspace.fs.delete(vscode.Uri.joinPath(directory, name))).catch(() => undefined))
+    );
+  }
+
+  // The readable name alone is not unique ("a/b.qmd" and "a_b.qmd" both sanitize to
+  // "a_b.qmd"); the hash keeps each document's folder, and so its pruning, separate.
+  private getArtifactDirectoryUri(storageUri: vscode.Uri, documentUri: string): vscode.Uri {
+    return vscode.Uri.joinPath(storageUri, "artifacts", `${sanitizePath(documentUri)}-${sha1(documentUri).slice(0, 12)}`);
   }
 
   private getKey(documentUri: string): string {

@@ -25,6 +25,7 @@ export interface InlineChunksExtensionApi {
       status: string;
       stale: boolean;
       outputTypes: string[];
+      imagePaths: string[];
     }>;
     outputChannelText: string;
   }>;
