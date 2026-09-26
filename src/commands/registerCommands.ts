@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import { InlineChunksNotebookRuntime } from "../notebook/notebookRuntime";
-import { serializeNotebookSource } from "../notebook/notebookSource";
 import { INLINE_CHUNKS_NOTEBOOK_TYPE, isInlineChunksNotebook } from "../notebook/notebookTypes";
 import { previewActiveNotebookHtml } from "./previewHtml";
 
@@ -60,7 +59,13 @@ export function registerCommands(controller: InlineChunksNotebookRuntime): vscod
 async function toggleSourceView(): Promise<void> {
   const activeNotebookEditor = vscode.window.activeNotebookEditor;
   if (activeNotebookEditor && isInlineChunksNotebook(activeNotebookEditor.notebook)) {
-    await persistNotebookSource(activeNotebookEditor.notebook);
+    // Save through VS Code rather than writing the file directly, so the notebook is
+    // not left dirty with a later save able to overwrite edits made in the raw view.
+    const notebook = activeNotebookEditor.notebook;
+    if (notebook.isDirty && !(await notebook.save())) {
+      void vscode.window.showWarningMessage("Rmd Notebooks: save the notebook before switching to the raw source view.");
+      return;
+    }
 
     const document = await vscode.workspace.openTextDocument(activeNotebookEditor.notebook.uri);
     await vscode.window.showTextDocument(document, {
@@ -73,6 +78,11 @@ async function toggleSourceView(): Promise<void> {
   const activeTextEditor = vscode.window.activeTextEditor;
   const targetUri = activeTextEditor?.document.uri;
   if (targetUri && isChunkSourceUri(targetUri)) {
+    // The notebook view loads from disk, so unsaved raw edits would not appear in it.
+    if (activeTextEditor.document.isDirty && !(await activeTextEditor.document.save())) {
+      void vscode.window.showWarningMessage("Rmd Notebooks: save the file before switching to the notebook view.");
+      return;
+    }
     await vscode.commands.executeCommand("vscode.openWith", targetUri, INLINE_CHUNKS_NOTEBOOK_TYPE);
     return;
   }
@@ -83,17 +93,4 @@ async function toggleSourceView(): Promise<void> {
 function isChunkSourceUri(uri: vscode.Uri): boolean {
   const lowerPath = uri.path.toLowerCase();
   return lowerPath.endsWith(".qmd") || lowerPath.endsWith(".rmd");
-}
-
-async function persistNotebookSource(notebook: vscode.NotebookDocument): Promise<void> {
-  const cells = notebook.getCells().map((cell) => {
-    const cellData = new vscode.NotebookCellData(cell.kind, cell.document.getText(), cell.document.languageId);
-    cellData.metadata = cell.metadata;
-    return cellData;
-  });
-
-  const data = new vscode.NotebookData(cells);
-  data.metadata = notebook.metadata;
-  const serialized = serializeNotebookSource(data);
-  await vscode.workspace.fs.writeFile(notebook.uri, serialized);
 }

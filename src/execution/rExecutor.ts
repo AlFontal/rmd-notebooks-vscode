@@ -37,14 +37,9 @@ interface RawExecutionPayload {
   success: boolean;
   startedAt: number;
   finishedAt: number;
-  stdout: string;
-  stderr: string;
-  html: string;
-  markdown: string;
-  messages: string;
-  warnings: string;
-  errors: string;
-  plots: string[];
+  // Output in the order R produced it. Types: STDOUT, STDERR, MESSAGE, WARNING,
+  // ERROR, HTML, MARKDOWN, PLOT (value is the PNG path).
+  events: Array<{ type: string; value: string }>;
 }
 
 interface DataFrameRenderOptions {
@@ -109,58 +104,11 @@ export class RExecutor implements Executor {
       context.token
     );
 
-    const items: OutputItem[] = [];
-
-    if (payload.stdout.trim().length > 0) {
-      items.push({
-        type: "text",
-        text: payload.stdout.trimEnd()
-      } satisfies TextOutputItem);
-    }
-
-    if (payload.stderr.trim().length > 0) {
-      items.push({ type: "stream", name: "stderr", text: payload.stderr.trimEnd() } satisfies StreamOutputItem);
-    }
-
-    if (payload.messages.trim().length > 0) {
-      items.push({ type: "stream", name: "stderr", kind: "message", text: payload.messages.trimEnd() } satisfies StreamOutputItem);
-    }
-
-    if (payload.warnings.trim().length > 0) {
-      items.push({ type: "stream", name: "stderr", kind: "warning", text: payload.warnings.trimEnd() } satisfies StreamOutputItem);
-    }
-
-    if (payload.errors.trim().length > 0) {
-      items.push({ type: "error", text: payload.errors.trimEnd() } satisfies ErrorOutputItem);
-    }
-
-    if (payload.html.trim().length > 0) {
-      items.push({
-        type: "html",
-        html: payload.html.trim()
-      } satisfies HtmlOutputItem);
-    }
-
-    if (payload.markdown.trim().length > 0) {
-      items.push({
-        type: "markdown",
-        markdown: payload.markdown.trimEnd()
-      } satisfies MarkdownOutputItem);
-    }
-
-    for (const plotPath of payload.plots) {
-      items.push({
-        type: "image",
-        path: plotPath,
-        mimeType: "image/png"
-      } satisfies ImageOutputItem);
-    }
-
     return {
       success: payload.success,
       startedAt: payload.startedAt,
       finishedAt: payload.finishedAt,
-      items
+      items: toOutputItems(payload.events)
     };
   }
 
@@ -492,7 +440,7 @@ class RSession {
 
         const payload = parseRawExecutionPayload(this.currentLines);
         if (this.runtimeStderr.trim().length > 0) {
-          payload.stderr = payload.stderr.length > 0 ? `${payload.stderr}\n${this.runtimeStderr.trimEnd()}` : this.runtimeStderr.trimEnd();
+          payload.events.push({ type: "STDERR", value: this.runtimeStderr.trimEnd() });
         }
         pending.resolve(payload);
       } catch (error) {
@@ -642,15 +590,58 @@ function parseRawExecutionPayload(lines: string[]): RawExecutionPayload {
     success: metadata.get("SUCCESS") === "1",
     startedAt: Number(metadata.get("STARTED_AT") ?? Date.now()),
     finishedAt: Number(metadata.get("FINISHED_AT") ?? Date.now()),
-    stdout: (sections.get("STDOUT") ?? []).join("\n"),
-    stderr: (sections.get("STDERR") ?? []).join("\n"),
-    html: (sections.get("HTML") ?? []).join("\n"),
-    markdown: (sections.get("MARKDOWN") ?? []).join("\n"),
-    messages: (sections.get("MESSAGE") ?? []).join("\n"),
-    warnings: (sections.get("WARNING") ?? []).join("\n"),
-    errors: (sections.get("ERROR") ?? []).join("\n"),
-    plots: (sections.get("PLOTS") ?? []).filter((entry) => entry.trim().length > 0)
+    events: (sections.get("EVENT_TYPES") ?? []).map((type, index) => ({
+      type,
+      value: sections.get("EVENT_VALUES")?.[index] ?? ""
+    }))
   };
+}
+
+// Converts the session's ordered events to output items, merging adjacent text of
+// the same kind so consecutive prints form one output.
+function toOutputItems(events: RawExecutionPayload["events"]): OutputItem[] {
+  const items: OutputItem[] = [];
+  for (const event of events) {
+    const item = toOutputItem(event.type, event.value);
+    if (!item) {
+      continue;
+    }
+    const previous = items.at(-1);
+    if (previous && "text" in previous && "text" in item && previous.type === item.type &&
+        (previous.type !== "stream" || previous.kind === (item as StreamOutputItem).kind)) {
+      previous.text = `${previous.text}\n${item.text}`;
+      continue;
+    }
+    items.push(item);
+  }
+  return items;
+}
+
+function toOutputItem(type: string, value: string): OutputItem | undefined {
+  if (type === "PLOT") {
+    return { type: "image", path: value, mimeType: "image/png" } satisfies ImageOutputItem;
+  }
+  if (value.trim().length === 0) {
+    return undefined;
+  }
+  switch (type) {
+    case "STDOUT":
+      return { type: "text", text: value.trimEnd() } satisfies TextOutputItem;
+    case "STDERR":
+      return { type: "stream", name: "stderr", text: value.trimEnd() } satisfies StreamOutputItem;
+    case "MESSAGE":
+      return { type: "stream", name: "stderr", kind: "message", text: value.trimEnd() } satisfies StreamOutputItem;
+    case "WARNING":
+      return { type: "stream", name: "stderr", kind: "warning", text: value.trimEnd() } satisfies StreamOutputItem;
+    case "ERROR":
+      return { type: "error", text: value.trimEnd() } satisfies ErrorOutputItem;
+    case "HTML":
+      return { type: "html", html: value.trim() } satisfies HtmlOutputItem;
+    case "MARKDOWN":
+      return { type: "markdown", markdown: value.trimEnd() } satisfies MarkdownOutputItem;
+    default:
+      return undefined;
+  }
 }
 
 function parsePromptRequest(lines: string[]): InteractivePromptRequest {

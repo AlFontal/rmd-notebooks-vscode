@@ -63,4 +63,6 @@ R messages, warnings, and errors are shown separately, formatted like knitr (`Wa
 
 Outputs are persisted with the notebook and restored when the document is reopened. Editing code marks stored output as stale.
 
-Python preserves IPython MIME bundles and ordered stream/rich-display events. R data frames can render as HTML tables according to the settings above.
+Python preserves IPython MIME bundles and ordered stream/rich-display events. R output is shown in the order it was produced, with one image per plot page. R data frames can render as HTML tables according to the settings above.
+
+R plot images are stored in the extension's workspace storage. Images no longer referenced by any output are deleted when a notebook is opened or closed and on Clear All Outputs.

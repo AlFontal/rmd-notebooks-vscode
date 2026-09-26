@@ -613,6 +613,10 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     const outputs = await this.ensureOutputsLoaded(notebook.uri.toString());
     outputs.clear();
     await this.outputStore.clearDocumentOutputs(notebook.uri.toString());
+    // A running chunk may already have written plot files it has not recorded yet.
+    if (!this.preparingExecutions.get(notebook.uri.toString())?.size) {
+      await this.outputStore.pruneArtifacts(notebook.uri.toString(), outputs);
+    }
     const selectedController = await this.ensureControllerSelected(notebook);
     if (!selectedController) {
       return;
@@ -671,7 +675,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
 
   public async getDocumentState(documentUri: string): Promise<{
     snapshot: { documentUri: string; version: number; chunkIds: string[] } | undefined;
-    outputs: Array<{ chunkId: string; status: string; stale: boolean; outputTypes: string[] }>;
+    outputs: Array<{ chunkId: string; status: string; stale: boolean; outputTypes: string[]; imagePaths: string[] }>;
     outputChannelText: string;
   }> {
     const notebook = vscode.workspace.notebookDocuments.find((candidate) => candidate.uri.toString() === documentUri);
@@ -694,7 +698,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         chunkId: record.chunkId,
         status: record.status,
         stale: record.stale,
-        outputTypes: record.outputs.map((output) => output.type)
+        outputTypes: record.outputs.map((output) => output.type),
+        imagePaths: record.outputs.flatMap((output) => (output.type === "image" ? [output.path] : []))
       })),
       outputChannelText: this.outputChannelController.getTranscript()
     };
@@ -794,6 +799,8 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
       void this.pythonDiscovery.ensureInitialized();
     }
     await this.refreshNotebook(notebook);
+    // Executions wait for initialization, so nothing can be writing plots yet.
+    await this.outputStore.pruneArtifacts(notebook.uri.toString(), await this.ensureOutputsLoaded(notebook.uri.toString()));
     await this.restoreOutputsToNotebook(notebook);
     await this.collapseInlineInputs(notebook);
   }
@@ -947,6 +954,7 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     await Promise.all(
       this.executorRegistry.all().map((executor) => executor.disposeSession?.(notebook.uri.toString()))
     );
+    await this.outputStore.pruneArtifacts(notebook.uri.toString(), await this.ensureOutputsLoaded(notebook.uri.toString()));
     this.refreshPythonControllers();
   }
 
@@ -1313,13 +1321,15 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
     const previousSnapshot = this.snapshots.get(notebook.uri.toString());
     let snapshot = buildNotebookSnapshot(notebook, outputs, previousSnapshot);
     this.snapshots.set(notebook.uri.toString(), snapshot);
-    reconcileOutputs(snapshot, outputs);
-    await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
+    let outputsChanged = reconcileOutputs(snapshot, outputs);
     const metadataChanged = await this.applyChunkMetadata(notebook, snapshot);
     if (metadataChanged) {
       snapshot = buildNotebookSnapshot(notebook, outputs, snapshot);
       this.snapshots.set(notebook.uri.toString(), snapshot);
-      reconcileOutputs(snapshot, outputs);
+      outputsChanged = reconcileOutputs(snapshot, outputs) || outputsChanged;
+    }
+    // Runs on every edit, so only write stored outputs when a record changed.
+    if (outputsChanged) {
       await this.outputStore.saveDocumentOutputs(notebook.uri.toString(), outputs);
     }
     return snapshot;
@@ -1445,8 +1455,11 @@ export class InlineChunksNotebookRuntime implements vscode.Disposable {
         // timestamps: passing capturedAt (in the past) as the end time made
         // VS Code render a negative duration like "-50.-4s".
         execution.start();
-        await execution.replaceOutput(await createNotebookOutputs(record));
-        execution.end(record.status === "success");
+        try {
+          await execution.replaceOutput(await createNotebookOutputs(record));
+        } finally {
+          execution.end(record.status === "success");
+        }
       }
     });
   }
@@ -1899,7 +1912,16 @@ function hasCellLanguageChanged(notebook: vscode.NotebookDocument, cellIndex: nu
     !areEquivalentChunkLanguages(executedLanguage, notebook.cellAt(cellIndex).document.languageId);
 }
 
-function reconcileOutputs(snapshot: NotebookSnapshot, outputs: Map<string, ChunkOutputRecord>): void {
+// Points stored records at their chunk's current position and marks them stale when
+// the chunk no longer matches the executed content. Returns whether any record changed.
+function reconcileOutputs(snapshot: NotebookSnapshot, outputs: Map<string, ChunkOutputRecord>): boolean {
+  let changed = false;
+  const update = <K extends keyof ChunkOutputRecord>(record: ChunkOutputRecord, key: K, value: ChunkOutputRecord[K]): void => {
+    if (record[key] !== value) {
+      record[key] = value;
+      changed = true;
+    }
+  };
   const liveChunkIds = new Set(snapshot.chunks.map((entry) => entry.chunk.identity.chunkId));
 
   for (const entry of snapshot.chunks) {
@@ -1908,21 +1930,21 @@ function reconcileOutputs(snapshot: NotebookSnapshot, outputs: Map<string, Chunk
       continue;
     }
 
-    record.language = entry.chunk.language;
-    record.header = entry.chunk.header;
-    record.label = entry.chunk.label;
-    record.startLine = entry.chunk.startLine;
-    record.headerHash = entry.chunk.identity.headerHash;
-    record.bodyHash = entry.chunk.identity.bodyHash;
-    record.stale = record.contentHash !== entry.chunk.identity.contentHash;
-    record.sourceKind = entry.sourceKind;
+    update(record, "language", entry.chunk.language);
+    update(record, "header", entry.chunk.header);
+    update(record, "label", entry.chunk.label);
+    update(record, "startLine", entry.chunk.startLine);
+    update(record, "stale", record.contentHash !== entry.chunk.identity.contentHash);
+    update(record, "sourceKind", entry.sourceKind);
   }
 
   for (const [chunkId, record] of outputs) {
     if (!liveChunkIds.has(chunkId)) {
-      record.stale = true;
+      update(record, "stale", true);
     }
   }
+
+  return changed;
 }
 
 function createRecord(
@@ -2008,7 +2030,17 @@ async function toNotebookOutput(item: OutputItem): Promise<vscode.NotebookCellOu
     );
   }
 
-  const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(item.path));
+  let bytes: Uint8Array;
+  try {
+    bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(item.path));
+  } catch {
+    return new vscode.NotebookCellOutput([
+      vscode.NotebookCellOutputItem.text(
+        `Plot \`${path.basename(item.path)}\` is no longer available. Re-run this cell to regenerate it.`,
+        "text/markdown"
+      )
+    ]);
+  }
   return new vscode.NotebookCellOutput([
     new vscode.NotebookCellOutputItem(bytes, item.mimeType),
     vscode.NotebookCellOutputItem.text(path.basename(item.path))
